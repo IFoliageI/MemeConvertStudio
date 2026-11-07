@@ -1,7 +1,10 @@
 /build/
+/build-*/
 /bin/
 /tmp/
 /dist/
+/.vs/
+/MemeStudio-error.txt
 /MemeStudio-Windows-x64.zip
 *.part
 *.memestudio/

@@ -9,10 +9,12 @@
 #include <memory>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 
 namespace studio {
 namespace {
 constexpr UINT WM_PROGRESS = WM_APP + 1, WM_FINISHED = WM_APP + 2;
+constexpr int settingsHeight = 1176;
 constexpr COLORREF ink = RGB(34, 39, 43), muted = RGB(104, 113, 120);
 constexpr COLORREF paper = RGB(245, 247, 248), line = RGB(218, 224, 227);
 enum Id {
@@ -20,7 +22,7 @@ enum Id {
     BaseUrl, Key, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
     Consistency, PreserveText, Resume, Remember, Instruction, Output, BrowseOutput,
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
-    FetchModels
+    FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages
 };
 struct State;
 struct View {
@@ -29,6 +31,9 @@ struct View {
     RECT imageRect{};
     POINT start{}, end{};
     bool dragging = false;
+    double zoom = 1, panX = 0, panY = 0;
+    double gestureDistance = 0;
+    POINT gesturePoint{};
 };
 struct Completion {
     bool success = false, modelFetch = false;
@@ -44,11 +49,13 @@ struct State {
     HBRUSH background = CreateSolidBrush(paper), white = CreateSolidBrush(RGB(255, 255, 255));
     std::vector<HWND> lockControls;
     Animation sourceAnimation, characterAnimation, resultAnimation;
+    std::shared_ptr<Image> previewImage;
     fs::path source, character, resultPath;
     std::vector<fs::path> stylePaths;
     Crop crop;
     View views[3];
     int frame = 0, elapsed = 0, scroll = 0;
+    double scrollFraction = 0;
     bool showingResult = false, playing = true, busy = false, closing = false, demo = false,
         fetchingModels = false;
     Cancel cancel;
@@ -78,6 +85,7 @@ struct State {
     Animation& active() { return showingResult ? resultAnimation : sourceAnimation; }
     void refreshViews() {
         frame = 0; elapsed = 0;
+        for (auto& view : views) { view.zoom = 1; view.panX = view.panY = 0; }
         SendMessageW(timeline, TBM_SETRANGEMIN, FALSE, 0);
         SendMessageW(timeline, TBM_SETRANGEMAX, TRUE, std::max(0, int(active().frames.size()) - 1));
         SendMessageW(timeline, TBM_SETPOS, TRUE, 0);
@@ -116,12 +124,27 @@ struct State {
         } catch (...) { set(estimate, L"请检查抽帧参数"); }
     }
 };
+static LRESULT CALLBACK settingsWheel(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+    UINT_PTR, DWORD_PTR parent) {
+    if (message == WM_MOUSEWHEEL) {
+        wchar_t type[32]{}; GetClassNameW(window, type, 32);
+        bool dropped = wcscmp(type, L"ComboBox") == 0 && SendMessageW(window, CB_GETDROPPEDSTATE, 0, 0);
+        if (!dropped) {
+            SendMessageW(reinterpret_cast<HWND>(parent), message, wparam, lparam);
+            return 0;
+        }
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, settingsWheel, 1);
+    return DefSubclassProc(window, message, wparam, lparam);
+}
 static HWND control(State& state, HWND parent, const wchar_t* type, const std::wstring& label,
     DWORD style, int id, int x, int y, int width, int height, bool lock = false) {
     HWND result = CreateWindowExW(wcscmp(type, L"EDIT") == 0 ? WS_EX_CLIENTEDGE : 0,
         type, label.c_str(), WS_CHILD | WS_VISIBLE | style, x, y, width, height,
         parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), state.instance, nullptr);
     SendMessageW(result, WM_SETFONT, reinterpret_cast<WPARAM>(state.font), TRUE);
+    if (parent == state.settings && !(wcscmp(type, L"EDIT") == 0 && (style & ES_MULTILINE)))
+        SetWindowSubclass(result, settingsWheel, 1, reinterpret_cast<DWORD_PTR>(parent));
     if (lock) state.lockControls.push_back(result);
     return result;
 }
@@ -167,6 +190,27 @@ static RECT fit(const Image& image, RECT area) {
     int x = area.left + (width - w) / 2, y = area.top + (height - h) / 2;
     return {x, y, x + w, y + h};
 }
+static RECT transformed(View& view, const Image& image, RECT area) {
+    RECT base = fit(image, area);
+    double width = (base.right - base.left) * view.zoom;
+    double height = (base.bottom - base.top) * view.zoom;
+    double limitX = std::max(0.0, (width - (area.right - area.left)) / 2);
+    double limitY = std::max(0.0, (height - (area.bottom - area.top)) / 2);
+    view.panX = std::clamp(view.panX, -limitX, limitX);
+    view.panY = std::clamp(view.panY, -limitY, limitY);
+    LONG x = LONG(std::lround((area.left + area.right - width) / 2 + view.panX));
+    LONG y = LONG(std::lround((area.top + area.bottom - height) / 2 + view.panY));
+    return {x, y, x + LONG(std::lround(width)), y + LONG(std::lround(height))};
+}
+static void zoomAt(View& view, double factor, POINT point, RECT client) {
+    double next = std::clamp(view.zoom * factor, 1.0, 8.0);
+    double ratio = next / view.zoom;
+    double x = point.x - (client.right + client.left) / 2.0;
+    double y = point.y - (client.bottom + client.top) / 2.0;
+    view.panX = x - (x - view.panX) * ratio;
+    view.panY = y - (y - view.panY) * ratio;
+    view.zoom = next;
+}
 static void drawImage(HDC target, const Image& image, RECT rect) {
     BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biWidth = image.width; info.bmiHeader.biHeight = -LONG(image.height);
@@ -194,6 +238,53 @@ static LRESULT CALLBACK viewProcedure(HWND window, UINT message, WPARAM wparam, 
     }
     if (!view) return DefWindowProcW(window, message, wparam, lparam);
     auto& state = *view->state;
+    if (message == WM_CREATE) {
+        GESTURECONFIG gestures[]{{GID_ZOOM, GC_ZOOM, 0},
+            {GID_PAN, GC_PAN | GC_PAN_WITH_INERTIA, 0}};
+        SetGestureConfig(window, 0, 2, gestures, sizeof(GESTURECONFIG));
+        return 0;
+    }
+    if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+        RECT client; GetClientRect(window, &client);
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(window, &point);
+        double delta = double(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA;
+        if (message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL))
+            zoomAt(*view, std::pow(1.15, delta), point, client);
+        else if (message == WM_MOUSEHWHEEL || (GET_KEYSTATE_WPARAM(wparam) & MK_SHIFT))
+            view->panX += (message == WM_MOUSEHWHEEL ? -1 : 1) * delta * 64;
+        else view->panY += delta * 64;
+        InvalidateRect(window, nullptr, FALSE); return 0;
+    }
+    if (message == WM_GESTURE) {
+        GESTUREINFO gesture{sizeof(gesture)};
+        if (!GetGestureInfo(reinterpret_cast<HGESTUREINFO>(lparam), &gesture))
+            return DefWindowProcW(window, message, wparam, lparam);
+        if (gesture.dwID != GID_ZOOM && gesture.dwID != GID_PAN)
+            return DefWindowProcW(window, message, wparam, lparam);
+        POINT point{gesture.ptsLocation.x, gesture.ptsLocation.y};
+        ScreenToClient(window, &point);
+        if (gesture.dwID == GID_ZOOM) {
+            double distance = double(gesture.ullArguments);
+            if (!(gesture.dwFlags & GF_BEGIN) && view->gestureDistance > 0) {
+                RECT client; GetClientRect(window, &client);
+                zoomAt(*view, distance / view->gestureDistance, point, client);
+            }
+            view->gestureDistance = distance;
+        } else {
+            if (!(gesture.dwFlags & GF_BEGIN)) {
+                view->panX += point.x - view->gesturePoint.x;
+                view->panY += point.y - view->gesturePoint.y;
+            }
+            view->gesturePoint = point;
+        }
+        CloseGestureInfoHandle(reinterpret_cast<HGESTUREINFO>(lparam));
+        InvalidateRect(window, nullptr, FALSE); return 0;
+    }
+    if (message == WM_LBUTTONDBLCLK) {
+        view->zoom = 1; view->panX = view->panY = 0;
+        InvalidateRect(window, nullptr, FALSE); return 0;
+    }
     if (message == WM_ERASEBKGND) return 1;
     if (message == WM_PAINT || message == WM_PRINTCLIENT) {
         PAINTSTRUCT paint{};
@@ -210,11 +301,17 @@ static LRESULT CALLBACK viewProcedure(HWND window, UINT message, WPARAM wparam, 
         DeleteObject(checker);
         Animation* animation = view->kind == 0 ? &state.sourceAnimation :
             view->kind == 1 ? &state.characterAnimation : &state.active();
-        if (!animation->frames.empty()) {
+        const Image* imageToDraw = nullptr;
+        if (view->kind == 2 && state.showingResult && state.previewImage)
+            imageToDraw = state.previewImage.get();
+        else if (!animation->frames.empty()) {
             int index = view->kind == 1 ? 0 : state.frame % static_cast<int>(animation->frames.size());
-            auto& image = animation->frames[index].image;
+            imageToDraw = &animation->frames[index].image;
+        }
+        if (imageToDraw) {
+            const auto& image = *imageToDraw;
             RECT inset{10, 10, client.right - 10, client.bottom - 10};
-            view->imageRect = fit(image, inset);
+            view->imageRect = transformed(*view, image, inset);
             drawImage(buffer, image, view->imageRect);
             if (view->kind == 1 && (state.crop.width < 0.999 || state.crop.height < 0.999 || view->dragging)) {
                 auto bounds = view->imageRect;
@@ -290,20 +387,30 @@ static LRESULT CALLBACK settingsProcedure(HWND window, UINT message, WPARAM wpar
     }
     if (message == WM_SIZE) {
         RECT rect; GetClientRect(window, &rect);
-        SCROLLINFO info{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS, 0, 836,
+        SCROLLINFO info{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS, 0, settingsHeight,
             static_cast<UINT>(rect.bottom), state->scroll, 0};
         SetScrollInfo(window, SB_VERT, &info, TRUE);
+        int next = GetScrollPos(window, SB_VERT);
+        ScrollWindowEx(window, 0, state->scroll - next, nullptr, nullptr, nullptr, nullptr,
+            SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+        state->scroll = next;
     }
     if (message == WM_VSCROLL || message == WM_MOUSEWHEEL) {
         SCROLLINFO info{sizeof(SCROLLINFO), SIF_ALL}; GetScrollInfo(window, SB_VERT, &info);
         int next = info.nPos;
-        if (message == WM_MOUSEWHEEL) next -= GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA * 64;
+        if (message == WM_MOUSEWHEEL) {
+            state->scrollFraction -= double(GET_WHEEL_DELTA_WPARAM(wparam)) * 64 / WHEEL_DELTA;
+            int movement = int(state->scrollFraction);
+            next += movement; state->scrollFraction -= movement;
+        }
         else switch (LOWORD(wparam)) {
             case SB_LINEUP: next -= 28; break;
             case SB_LINEDOWN: next += 28; break;
             case SB_PAGEUP: next -= info.nPage; break;
             case SB_PAGEDOWN: next += info.nPage; break;
             case SB_THUMBTRACK: next = info.nTrackPos; break;
+            case SB_TOP: next = 0; break;
+            case SB_BOTTOM: next = info.nMax; break;
         }
         next = std::clamp(next, 0, std::max(0, info.nMax - int(info.nPage) + 1));
         ScrollWindowEx(window, 0, state->scroll - next, nullptr, nullptr, nullptr, nullptr,
@@ -341,27 +448,39 @@ static void createSettings(State& state) {
     SendMessageW(model, CB_SETDROPPEDWIDTH, 292, 0);
     control(state, state.settings, L"BUTTON", L"获取模型", WS_TABSTOP | BS_PUSHBUTTON,
         FetchModels, 218, 216, 90, 28, true);
-    label(L"质量", 256); combo(Quality, 278, {L"auto", L"low", L"medium", L"high", L"不发送"});
-    label(L"输出尺寸参数", 318); combo(Size, 340,
+    label(L"质量 Quality", 256); combo(Quality, 278, {L"auto", L"low", L"medium", L"high", L"xhigh", L"max", L"不发送"});
+    label(L"复杂度 Complexity", 318); combo(Complexity, 340, {L"不发送", L"low", L"medium", L"high"});
+    label(L"返回格式 Format", 380); combo(OutputFormat, 402, {L"不发送", L"png", L"jpeg", L"webp"});
+    label(L"压缩质量 Compression (0–100)", 442);
+    combo(Compression, 464, {L"不发送", L"100", L"90", L"80", L"70", L"50", L"25", L"0"}, true);
+    checkbox(Streaming, L"流式接收局部图像", 504, true);
+    label(L"局部预览数量", 538); combo(PartialImages, 560, {L"2", L"1", L"3"});
+    label(L"输出尺寸参数", 600); combo(Size, 622,
         {L"auto", L"1024x1024", L"1536x1024", L"1024x1536", L"不发送"}, true);
-    label(L"多图上传字段", 380); combo(ImageField, 402, {L"image[]", L"image"});
-    label(L"扩展参数（JSON）", 442);
-    editControl(Extra, L"{}", 464, 60, ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
-    label(L"单次请求超时（秒）", 536); editControl(Timeout, L"600", 558, 28, ES_NUMBER);
-    label(L"GIF 间隔 / 帧数上限（0 不限）", 600);
-    auto stride = editControl(Stride, L"1", 624, 28, ES_NUMBER);
-    auto maximum = editControl(MaxFrames, L"24", 624, 28, ES_NUMBER);
-    MoveWindow(stride, 16, 624, 138, 28, TRUE); MoveWindow(maximum, 170, 624, 138, 28, TRUE);
-    checkbox(Consistency, L"多帧参考：动作、画风与背景一致", 668, true);
-    checkbox(PreserveText, L"保留原表情文字", 702, true);
-    checkbox(Resume, L"复用已完成帧，支持断点续作", 736, true);
+    label(L"多图上传字段", 662); combo(ImageField, 684, {L"image[]", L"image"});
+    label(L"扩展参数（JSON）", 724);
+    editControl(Extra, L"{}", 746, 60, ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
+    label(L"单次请求超时（秒）", 818); editControl(Timeout, L"600", 840, 28, ES_NUMBER);
+    label(L"GIF 间隔 / 帧数上限（0 不限）", 882);
+    auto stride = editControl(Stride, L"1", 906, 28, ES_NUMBER);
+    auto maximum = editControl(MaxFrames, L"24", 906, 28, ES_NUMBER);
+    MoveWindow(stride, 16, 906, 138, 28, TRUE); MoveWindow(maximum, 170, 906, 138, 28, TRUE);
+    checkbox(Consistency, L"多帧参考：动作、画风与背景一致", 950, true);
+    checkbox(PreserveText, L"保留原表情文字", 984, true);
+    checkbox(Resume, L"复用已完成帧，支持断点续作", 1018, true);
+}
+static void updateProviderControls(State& state) {
+    auto format = state.text(state.get(OutputFormat));
+    EnableWindow(state.get(Compression), !state.busy && (format == L"jpeg" || format == L"webp"));
+    EnableWindow(state.get(PartialImages), !state.busy && state.checked(Streaming));
 }
 static void saveSettings(State& state) {
     if (state.demo) return;
     Json data;
-    for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames})
+    for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
+        Complexity, OutputFormat, Compression, PartialImages})
         data[std::to_string(id)] = utf8(state.text(state.get(id)));
-    for (int id : {Consistency, PreserveText, Resume, Remember}) data[std::to_string(id)] = state.checked(id);
+    for (int id : {Consistency, PreserveText, Resume, Remember, Streaming}) data[std::to_string(id)] = state.checked(id);
     if (state.checked(Remember)) data["encrypted_key"] = protect(state.text(state.get(Key)));
     writeJson(settingsPath(), data);
 }
@@ -370,16 +489,17 @@ static void loadSettings(State& state) {
     try {
         if (!fs::exists(settingsPath())) return;
         Json data = readJson(settingsPath());
-        for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames}) {
+        for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
+            Complexity, OutputFormat, Compression, PartialImages}) {
             if (!data.contains(std::to_string(id))) continue;
             auto text = wide(data.at(std::to_string(id)).get<std::string>());
             HWND item = state.get(id);
-            if (id == Quality || id == ImageField) {
+            if (id == Quality || id == ImageField || id == Complexity || id == OutputFormat || id == PartialImages) {
                 auto index = SendMessageW(item, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(text.c_str()));
                 if (index != CB_ERR) SendMessageW(item, CB_SETCURSEL, index, 0);
             } else state.set(item, text);
         }
-        for (int id : {Consistency, PreserveText, Resume, Remember})
+        for (int id : {Consistency, PreserveText, Resume, Remember, Streaming})
             if (data.contains(std::to_string(id))) state.checkBox(id, data[std::to_string(id)].get<bool>());
         if (state.checked(Remember) && data.contains("encrypted_key"))
             state.set(state.get(Key), unprotect(data["encrypted_key"].get<std::string>()));
@@ -391,6 +511,7 @@ static void loadSource(State& state, const fs::path& path) {
     auto animation = decode(path);
     state.source = path; state.sourceAnimation = std::move(animation);
     state.resultAnimation = {}; state.resultPath.clear();
+    state.previewImage.reset();
     state.set(state.sourcePath, path.filename().wstring());
     fs::path output = path.parent_path() / (path.stem().wstring() + L"-edited" +
         (state.sourceAnimation.animated ? L".gif" : L".png"));
@@ -448,6 +569,15 @@ static void start(State& state) {
     if (modelBegin == std::string::npos) throw Error("请先选择或填写模型名称");
     job.provider.model = job.provider.model.substr(modelBegin, modelEnd - modelBegin + 1);
     job.provider.size = utf8(state.text(state.get(Size))); job.provider.imageField = utf8(state.text(state.get(ImageField)));
+    job.provider.complexity = utf8(state.text(state.get(Complexity)));
+    job.provider.outputFormat = utf8(state.text(state.get(OutputFormat)));
+    if (job.provider.complexity == utf8(L"不发送")) job.provider.complexity.clear();
+    if (job.provider.outputFormat == utf8(L"不发送")) job.provider.outputFormat.clear();
+    if ((job.provider.outputFormat == "jpeg" || job.provider.outputFormat == "webp") &&
+        state.text(state.get(Compression)) != L"不发送")
+        job.provider.compression = state.number(Compression, 0, 100);
+    job.provider.stream = state.checked(Streaming);
+    if (job.provider.stream) job.provider.partialImages = state.number(PartialImages, 1, 3);
     if (job.provider.quality == utf8(L"不发送")) job.provider.quality.clear();
     if (job.provider.size == utf8(L"不发送")) job.provider.size.clear();
     job.provider.timeoutSeconds = state.number(Timeout, 5, 3600);
@@ -469,6 +599,7 @@ static void start(State& state) {
     for (auto control : state.lockControls) EnableWindow(control, FALSE);
     EnableWindow(GetDlgItem(state.window, CancelJob), TRUE);
     state.set(state.status, L"正在准备任务…");
+    state.previewImage.reset(); state.showingResult = true;
     state.logLine(L"任务开始，模型：" + wide(job.provider.model));
     SendMessageW(state.progress, PBM_SETPOS, 0, 0);
     if (state.worker.joinable()) state.worker.join();
@@ -575,7 +706,7 @@ static void initialize(State& state) {
     EnableWindow(GetDlgItem(state.window, CancelJob), FALSE);
     state.settings = CreateWindowExW(WS_EX_CONTROLPARENT, L"MemeStudioSettings", L"供应商和生成参数",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL, 850, 60, 332, 760, state.window, nullptr, state.instance, &state);
-    createSettings(state); loadSettings(state);
+    createSettings(state); loadSettings(state); updateProviderControls(state);
     HWND tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
         WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, state.window, nullptr, state.instance, nullptr);
@@ -590,6 +721,9 @@ static void initialize(State& state) {
     tip(state.get(Stride), L"每隔多少源帧生成一帧；合并对应显示时长");
     tip(state.get(MaxFrames), L"自动抽帧，覆盖完整动画；0 表示不设上限");
     tip(state.get(ImageField), L"多张图片重复使用同一个上传字段");
+    tip(state.mainView, L"双指滚动平移；捏合或 Ctrl+滚动缩放；双击恢复适应窗口");
+    tip(state.get(Complexity), L"独立于 Quality；由供应商和模型决定是否支持");
+    tip(state.get(Compression), L"JPEG/WebP 压缩质量；100 保留最多细节");
     if (state.text(state.get(Key)).empty() && !state.demo) {
         wchar_t key[8192]{};
         DWORD count = GetEnvironmentVariableW(L"OPENAI_API_KEY", key, 8192);
@@ -600,6 +734,8 @@ static void initialize(State& state) {
 }
 static void command(State& state, int id, int notification) {
     if ((id == Stride || id == MaxFrames) && notification == EN_CHANGE) { state.updateEstimate(); return; }
+    if ((id == OutputFormat && notification == CBN_SELCHANGE) ||
+        (id == Streaming && notification == BN_CLICKED)) { updateProviderControls(state); return; }
     if (id == Source || id == Character) {
         auto paths = chooseImages(state.window, false); if (paths.empty()) return;
         if (id == Source) loadSource(state, paths[0]); else loadCharacter(state, paths[0]);
@@ -665,7 +801,8 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             state->elapsed += 20;
             if (state->elapsed >= static_cast<int>(std::max(20u, frames[state->frame].delayMs))) {
                 state->elapsed = 0; state->frame = (state->frame + 1) % static_cast<int>(frames.size());
-                SendMessageW(state->timeline, TBM_SETPOS, TRUE, state->frame); state->updateFrameLabel();
+                SendMessageW(state->timeline, TBM_SETPOS, TRUE, state->frame);
+                if (!state->showingResult || !state->previewImage) state->updateFrameLabel();
                 InvalidateRect(state->mainView, nullptr, FALSE); InvalidateRect(state->sourceView, nullptr, FALSE);
             }
             return 0;
@@ -674,6 +811,15 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             std::unique_ptr<Progress> progress(reinterpret_cast<Progress*>(lparam));
             state->set(state->status, progress->message);
             if (progress->total) SendMessageW(state->progress, PBM_SETPOS, progress->done * 100 / progress->total, 0);
+            if (progress->frame >= 0) {
+                state->previewImage = progress->preview;
+                if (state->showingResult) {
+                    InvalidateRect(state->mainView, nullptr, FALSE);
+                    state->set(state->frameInfo, progress->partial >= 0 ?
+                        L"局部 " + std::to_wstring(progress->partial + 1) :
+                        std::to_wstring(progress->frame + 1) + L" / " + std::to_wstring(progress->total));
+                }
+            }
             state->logLine(progress->message); return 0;
         }
         case WM_FINISHED: {
@@ -681,6 +827,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             if (state->worker.joinable()) state->worker.join();
             state->busy = false;
             for (auto control : state->lockControls) EnableWindow(control, TRUE);
+            updateProviderControls(*state);
             EnableWindow(GetDlgItem(window, CancelJob), FALSE);
             if (completion->modelFetch) {
                 state->fetchingModels = false;
@@ -713,6 +860,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
                 state->cancel.stopped ? L"已取消，可继续生成" : L"任务失败，已保留完成帧");
             state->logLine(completion->message);
             if (completion->success) {
+                state->previewImage.reset();
                 state->resultAnimation = decode(completion->output); state->resultPath = completion->output;
                 state->showingResult = true; state->refreshViews();
             } else if (!state->closing && !state->cancel.stopped) {
@@ -752,6 +900,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
     type.hCursor = LoadCursorW(nullptr, IDC_ARROW); type.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     type.hbrBackground = state.background; type.lpszClassName = L"MemeStudio"; type.lpfnWndProc = procedure;
     RegisterClassExW(&type);
+    type.style = CS_DBLCLKS;
     type.hbrBackground = state.white; type.lpszClassName = L"MemeStudioView"; type.lpfnWndProc = viewProcedure;
     RegisterClassExW(&type);
     type.lpszClassName = L"MemeStudioSettings"; type.lpfnWndProc = settingsProcedure;
@@ -808,6 +957,39 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         if (state.crop.width < .4 || state.crop.width > .6 || state.crop.height < .4 || state.crop.height > .6)
             throw Error("Reference crop interaction failed");
         report["character_crop"] = "passed";
+        if (state.text(state.get(Complexity)) != L"不发送" || !state.checked(Streaming) ||
+            IsWindowEnabled(state.get(Compression)))
+            throw Error("New provider control defaults are invalid");
+        SendMessageW(state.get(OutputFormat), CB_SETCURSEL, 2, 0);
+        command(state, OutputFormat, CBN_SELCHANGE);
+        if (!IsWindowEnabled(state.get(Compression))) throw Error("JPEG compression control is disabled");
+        state.checkBox(Streaming, false); command(state, Streaming, BN_CLICKED);
+        if (IsWindowEnabled(state.get(PartialImages))) throw Error("Partial control must follow streaming");
+        state.checkBox(Streaming, true); command(state, Streaming, BN_CLICKED);
+        report["provider_controls"] = "passed";
+        // Sub-notch wheel input must scroll the panel, rather than changing the model.
+        auto model = state.text(state.get(Model));
+        SendMessageW(state.get(Model), WM_MOUSEWHEEL, MAKEWPARAM(0, -15), 0);
+        if (state.scroll <= 0 || state.text(state.get(Model)) != model)
+            throw Error("High-resolution panel scrolling failed");
+        viewProcedure(state.mainView, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, 120), 0);
+        if (state.views[2].zoom <= 1) throw Error("Pinch/Ctrl wheel zoom failed");
+        viewProcedure(state.mainView, WM_MOUSEHWHEEL, MAKEWPARAM(0, 15), 0);
+        if (state.views[2].panX == 0) throw Error("Horizontal high-resolution pan failed");
+        viewProcedure(state.mainView, WM_LBUTTONDBLCLK, 0, 0);
+        if (state.views[2].zoom != 1 || state.views[2].panX != 0) throw Error("Preview reset failed");
+        report["precision_wheel_messages"] = "passed";
+        auto preview = std::make_unique<Progress>();
+        preview->frame = 0; preview->total = 3; preview->partial = 0;
+        preview->message = L"第 1 帧：收到局部预览 1";
+        preview->preview = std::make_shared<Image>(state.characterAnimation.frames.front().image);
+        state.showingResult = true;
+        SendMessageW(window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(preview.release()));
+        if (!state.previewImage || state.text(state.frameInfo) != L"局部 1")
+            throw Error("Partial image preview dispatch failed");
+        report["partial_preview_dispatch"] = "passed";
+        SendMessageW(state.settings, WM_VSCROLL, SB_BOTTOM, 0);
+        snapshot(1280, 900, L"ui-settings.png");
         writeJson(demo / L"ui-results.json", report);
         DestroyWindow(window);
         return 0;

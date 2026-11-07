@@ -82,6 +82,8 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
         {"version", 3}, {"source", digest(readFile(job.source))}, {"identity", digest(identity)},
         {"styles", Json::array()}, {"endpoint", utf8(editUrl(job.provider.baseUrl))},
         {"model", job.provider.model}, {"quality", job.provider.quality},
+        {"complexity", job.provider.complexity}, {"output_format", job.provider.outputFormat},
+        {"output_compression", job.provider.compression},
         {"size", job.provider.size}, {"extra", job.provider.extra}, {"field", job.provider.imageField},
         {"stride", stride}, {"text", job.preserveText}, {"consistency", job.consistency},
         {"instruction", utf8(job.instruction)}, {"total", total},
@@ -150,9 +152,14 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
             if (hasAnchor) uploads.push_back({"anchor", anchor});
             report({completed, total, L"正在生成第 " + std::to_wstring(frameIndex + 1) +
                 L" / " + std::to_wstring(total) + L" 帧（前参考 " + std::to_wstring(before) +
-                L"，后参考 " + std::to_wstring(after) + L"）…"});
+                L"，后参考 " + std::to_wstring(after) + L"）…", {}, frameIndex});
             result = edit(job.provider, prompt(job, frameIndex, total, job.styles.size(), hasAnchor, neighbors),
-                uploads, cancel);
+                uploads, cancel, [&](const Image& image, int partialIndex) {
+                    cancel.verify();
+                    report({completed, total, L"第 " + std::to_wstring(frameIndex + 1) +
+                        L" 帧：收到局部预览 " + std::to_wstring(partialIndex + 1),
+                        std::make_shared<Image>(limited(image, 1024)), frameIndex, partialIndex});
+                });
             cancel.verify();
             result = resized(result, original.width, original.height);
             savePng(framePath, result);
@@ -167,7 +174,8 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
         generated[frameIndex] = {std::move(result), static_cast<UINT>(duration)};
         ++completed;
         report({completed, total, L"已完成 " + std::to_wstring(completed) +
-            L" / " + std::to_wstring(total) + L" 帧"});
+            L" / " + std::to_wstring(total) + L" 帧",
+            std::make_shared<Image>(limited(generated[frameIndex].image, 1024)), frameIndex});
     }
     cancel.verify();
     report({total, total, L"正在写入输出文件…"});

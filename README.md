@@ -29,7 +29,7 @@ Windows 原生 C++20 桌面程序，通过可自定义供应商的 OpenAI 兼容
 - 默认重复使用 `image[]` 上传字段；部分供应商需要重复 `image`，可在设置中切换。
 - 支持 `data[0].b64_json` 和 `data[0].url` 两类响应；图像 URL 支持 HTTPS 和 base64 data URL。
 - 质量和尺寸参数可以设为“不发送”。扩展 JSON 对象允许增加供应商支持的参数，例如 `{"input_fidelity":"high"}`。参数值按 multipart 字段发送，复杂值编码为 JSON 文本。
-- 不自动发送 `response_format`、`output_format` 或 `input_fidelity`，避免要求供应商必须支持这些可选字段。
+- Complexity、Format、Compression 默认“不发送”，不自动发送 `response_format` 或 `input_fidelity`。供应商是否接受某个可选参数取决于模型和接口。
 - 不支持只提供 Chat Completions 图片输出、异步轮询任务或私有认证协议的服务。供应商必须支持多图编辑，单图生成接口不足以完成此任务。
 - 供应商必须使用 HTTPS，本机 `localhost` / `127.0.0.1` 调试可使用 HTTP。程序不跟随接口重定向；下载结果图时不携带 API Key。
 
@@ -39,6 +39,28 @@ Windows 原生 C++20 桌面程序，通过可自定义供应商的 OpenAI 兼容
 - https://platform.openai.com/docs/api-reference/images/createEdit
 
 默认模型名为 `gpt-image-1`；请以你的供应商实际支持的名称为准。
+
+## 流式预览与返回参数
+
+- “流式接收局部图像”在界面中默认开启，发送 `stream=true` 和 `partial_images`（可选 1–3，默认 2）。接收 SSE 的 `image_edit.partial_image` 和 `image_edit.completed` 事件；兼容对应的 `image_generation` 事件名。局部图像会即时显示在“结果”预览中，数量由供应商决定。
+- 兼容跨网络分块的事件、CRLF/LF、注释和多行 data。供应商忽略流式选项并返回普通 JSON 时，仍可读取最终图像；供应商拒绝流式参数时，请关闭该选项后重试。程序不会自动重试付费请求。
+- 局部图像只作预览，收到最终完成事件后才保存帧缓存和成品。中断或服务端报错不会把局部图像当作完成帧；取消可中止流式网络等待。
+- Quality 与 Complexity 分别设置。Quality 提供 `auto/low/medium/high/xhigh/max`，Complexity 提供“不发送/low/medium/high”；不要将两者混为同一参数。模型支持范围由供应商决定。
+- Format 设置供应商返回的 `png/jpeg/webp` 格式。“不发送”使用供应商默认值；WebP 解码依赖系统可用的 WIC WebP 编解码器。
+- Compression 是返回 JPEG/WebP 的压缩质量，范围 0–100，100 保留最多细节、压缩最少。仅在 Format 为 `jpeg` 或 `webp` 时启用；选择 PNG 或“不发送”时不发送此字段。
+- Format 和 Compression 控制网络返回图像；本地成品仍按任务导出 PNG 或 GIF。原生动画 GIF 和 SVG 返回尚未接入此逐帧流程，不能在扩展 JSON 中覆盖这些专用选项。
+- Complexity、Format、Compression 会影响帧缓存标识；仅切换流式预览或局部预览数量不会使已完成缓存失效。
+
+官方字段与事件参考：
+
+- https://developers.openai.com/api/reference/resources/images/methods/edit
+- https://developers.openai.com/api/reference/resources/images/edit-streaming-events
+
+## 触控板操作
+
+设置面板保留小于一个标准滚轮刻度的滚动量，支持精准触控板的小幅连续双指滚动。光标位于关闭的下拉框或单行输入框上时，滚动面板而不意外更改参数；展开的下拉列表和多行编辑框保留自身的滚动行为。
+
+预览支持高分辨率横向/纵向滚动平移；捏合产生的 Ctrl+滚动消息或原生缩放手势用于以指针位置为中心缩放（1–8 倍）。原生平移手势亦可处理；双击恢复适应窗口，人物框选坐标随缩放后的图像计算。实际手势是否被系统发送给应用取决于触控板驱动及 Windows 设置。
 
 ## GIF 行为与调用量
 
@@ -101,6 +123,10 @@ node .\tests\integration.mjs
 
 第一步构建程序并执行 C++ 本地测试；第二步需要 Node.js，仅用于运行模拟供应商集成测试，正式程序不依赖 Node.js。集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
 
+只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-next.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-next.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-next.exe`。
+
+流式与参数定向检查为 `node tests/streaming.mjs`，可通过 `--exe=D:\Projects\MemeStudio\bin\MemeStudio-next.exe` 指定构建产物；不调用真实供应商。
+
 也提供 CMake 工程：
 
 ```powershell
@@ -132,6 +158,11 @@ Start-Process .\bin\MemeStudio.exe -ArgumentList @("--job", "D:\path\job.json") 
   "model": "gpt-image-1",
   "api_key_env": "OPENAI_API_KEY",
   "quality": "auto",
+  "complexity": "high",
+  "stream": true,
+  "partial_images": 2,
+  "output_format": "jpeg",
+  "output_compression": 85,
   "size": "auto",
   "image_field": "image[]",
   "extra": {},
@@ -147,9 +178,15 @@ Start-Process .\bin\MemeStudio.exe -ArgumentList @("--job", "D:\path\job.json") 
 }
 ```
 
+命令行默认不启用流式；Complexity、Format 默认省略，Compression 默认 `-1`（不发送）。可选 `preview_file` 指定实时预览 PNG 路径，`progress_file` 包含 `frame` 与 `partial_image_index`，其中 `-1` 表示非局部图像事件。
+
 坐标均为相对于参考图尺寸的 0..1 比例。命令行任务中已有的输出文件会在完成后替换，失败时进程退出码为 1，并在配置文件旁写入 `MemeStudio-error.txt`。
 
 可用 `MemeStudio.exe --inspect <图片路径> <报告.json>` 导出尺寸、帧时长和循环信息。`loop: 65536` 表示没有循环扩展，`0` 表示无限循环，`1..65535` 是 GIF 扩展中的重复次数。
+
+## 本地版本管理
+
+项目已在 `D:\Projects\MemeStudio` 初始化本地 Git 仓库，默认分支为 `main`，包含功能修改前的初始快照和后续功能提交。没有配置远程仓库或推送。`bin`、`build`、`dist`、`tmp`、发布 ZIP 与生成帧缓存不纳入版本管理；用户密钥仍保存在项目外的系统设置目录。
 
 ## 限制
 

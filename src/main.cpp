@@ -41,6 +41,11 @@ int wmain(int argc, wchar_t** argv) {
             job.provider.model = config.value("model", "gpt-image-1");
             job.provider.quality = config.value("quality", "auto");
             job.provider.size = config.value("size", "auto");
+            job.provider.complexity = config.value("complexity", "");
+            job.provider.outputFormat = config.value("output_format", "");
+            job.provider.compression = config.value("output_compression", -1);
+            job.provider.stream = config.value("stream", false);
+            job.provider.partialImages = config.value("partial_images", 2);
             job.provider.imageField = config.value("image_field", "image[]");
             job.provider.extra = config.value("extra", Json::object());
             job.provider.timeoutSeconds = config.value("timeout_seconds", 600);
@@ -60,9 +65,12 @@ int wmain(int argc, wchar_t** argv) {
             }
             Cancel cancel;
             runJob(job, cancel, [&](const Progress& progress) {
+                if (progress.preview && config.contains("preview_file"))
+                    savePng(wide(config["preview_file"].get<std::string>()), *progress.preview);
                 if (config.contains("progress_file"))
                     writeJson(wide(config["progress_file"].get<std::string>()),
-                        {{"done", progress.done}, {"total", progress.total}, {"message", utf8(progress.message)}});
+                        {{"done", progress.done}, {"total", progress.total}, {"message", utf8(progress.message)},
+                         {"frame", progress.frame}, {"partial_image_index", progress.partial}});
             });
         } else {
             exitCode = runGui(GetModuleHandleW(nullptr), argc >= 3 && std::wstring(argv[1]) == L"--demo" ? argv[2] : fs::path{});

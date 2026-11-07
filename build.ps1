@@ -1,5 +1,6 @@
-param([switch]$Test)
+param([switch]$Test, [string]$ExecutableName = "MemeStudio.exe")
 $ErrorActionPreference = "Stop"
+if ($ExecutableName -notmatch '^[A-Za-z0-9_-]+\.exe$') { throw "ExecutableName must be a simple .exe filename." }
 $project = $PSScriptRoot
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (!(Test-Path -LiteralPath $vswhere)) { throw "Install Visual Studio C++ Build Tools first." }
@@ -12,15 +13,16 @@ try {
     $sources = @("util.cpp", "image.cpp", "api.cpp", "job.cpp", "gui.cpp", "main.cpp", "..\tests\tests.cpp")
     $arguments = ($sources | ForEach-Object { '"' + (Join-Path "$project\src" $_) + '"' }) -join " "
     $libraries = "user32.lib gdi32.lib msimg32.lib windowscodecs.lib ole32.lib oleaut32.lib uuid.lib comctl32.lib comdlg32.lib shell32.lib shlwapi.lib winhttp.lib crypt32.lib bcrypt.lib propsys.lib"
-    $command = 'call "' + $developerCommand + '" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++20 /MP4 /O2 /EHsc /utf-8 /MT /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN ' + $arguments + ' /Fe:"' + $project + '\bin\MemeStudio.exe" /link ' + $libraries + ' /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup /MANIFEST:EMBED /MANIFESTINPUT:"' + $project + '\src\app.manifest"'
+    $executable = Join-Path $project "bin\$ExecutableName"
+    $command = 'call "' + $developerCommand + '" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++20 /MP4 /O2 /EHsc /utf-8 /MT /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN ' + $arguments + ' /Fe:"' + $executable + '" /link ' + $libraries + ' /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup /MANIFEST:EMBED /MANIFESTINPUT:"' + $project + '\src\app.manifest"'
     & $env:ComSpec /d /s /c $command
     if ($LASTEXITCODE -ne 0) { throw "C++ build failed." }
     if ($Test) {
-        $process = Start-Process -FilePath "$project\bin\MemeStudio.exe" -ArgumentList @("--self-test", "$project\tmp\tests") -WindowStyle Hidden -PassThru -Wait
+        $process = Start-Process -FilePath $executable -ArgumentList @("--self-test", "$project\tmp\tests") -WindowStyle Hidden -PassThru -Wait
         Get-Content -LiteralPath "$project\tmp\tests\results.txt"
         if ($process.ExitCode -ne 0) { throw "Self tests failed." }
-        $process = Start-Process -FilePath "$project\bin\MemeStudio.exe" -ArgumentList @("--ui-check", "$project\tmp\tests") -WindowStyle Hidden -PassThru -Wait
+        $process = Start-Process -FilePath $executable -ArgumentList @("--ui-check", "$project\tmp\tests") -WindowStyle Hidden -PassThru -Wait
         if ($process.ExitCode -ne 0) { throw "UI rendering check failed." }
     }
-    Write-Host "Ready: $project\bin\MemeStudio.exe"
+    Write-Host "Ready: $executable"
 } finally { Pop-Location }

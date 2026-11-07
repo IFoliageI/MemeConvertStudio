@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 #include "../vendor/nlohmann/json.hpp"
@@ -62,6 +63,10 @@ struct Provider {
     std::string quality = "auto";
     std::string size = "auto";
     std::string imageField = "image[]";
+    std::string complexity, outputFormat;
+    int compression = -1;
+    bool stream = false;
+    int partialImages = 2;
     Json extra = Json::object();
     int timeoutSeconds = 600;
 };
@@ -84,7 +89,8 @@ std::vector<std::string> listModels(const Provider& provider, Cancel& cancel);
 Multipart multipart(const Provider& provider, const std::string& prompt,
                     const std::vector<Upload>& images);
 Image edit(const Provider& provider, const std::string& prompt,
-           const std::vector<Upload>& images, Cancel& cancel);
+           const std::vector<Upload>& images, Cancel& cancel,
+           const std::function<void(const Image&, int)>& preview = {});
 
 struct Job {
     Provider provider;
@@ -98,7 +104,12 @@ struct Job {
     bool preserveText = true;
     bool resume = true;
 };
-struct Progress { int done = 0, total = 0; std::wstring message; };
+struct Progress {
+    int done = 0, total = 0;
+    std::wstring message;
+    std::shared_ptr<Image> preview;
+    int frame = -1, partial = -1;
+};
 using Reporter = std::function<void(const Progress&)>;
 std::string prompt(const Job& job, int index, int total, size_t styleCount, bool anchor,
                    const std::vector<int>& neighbors = {});

@@ -73,6 +73,18 @@ Multipart multipart(const Provider& provider, const std::string& text, const std
     if (std::any_of(model.begin(), model.end(), [](unsigned char c) { return c < 32 || c == 127; }))
         throw Error("模型名称不能包含控制字符");
     if (!provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
+    if (!provider.complexity.empty() && provider.complexity != "low" &&
+        provider.complexity != "medium" && provider.complexity != "high")
+        throw Error("Complexity 必须为 low、medium、high 或不发送");
+    if (!provider.outputFormat.empty() && provider.outputFormat != "png" &&
+        provider.outputFormat != "jpeg" && provider.outputFormat != "webp")
+        throw Error("返回格式必须为 png、jpeg、webp 或不发送");
+    if (provider.compression < -1 || provider.compression > 100)
+        throw Error("Compression 必须为 0 到 100");
+    if (provider.compression >= 0 && provider.outputFormat != "jpeg" && provider.outputFormat != "webp")
+        throw Error("Compression 仅适用于 jpeg 或 webp 返回格式");
+    if (provider.stream && (provider.partialImages < 1 || provider.partialImages > 3))
+        throw Error("局部预览数量必须为 1 到 3");
     GUID guid{}; check(CoCreateGuid(&guid), "Multipart boundary");
     wchar_t name[48]{}; StringFromGUID2(guid, name, 48);
     // StringFromGUID2 includes braces, which are not valid MIME boundary characters.
@@ -87,11 +99,20 @@ Multipart multipart(const Provider& provider, const std::string& text, const std
     field("prompt", text);
     if (!provider.quality.empty()) field("quality", provider.quality);
     if (!provider.size.empty()) field("size", provider.size);
+    if (!provider.complexity.empty()) field("complexity", provider.complexity);
+    if (!provider.outputFormat.empty()) field("output_format", provider.outputFormat);
+    if (provider.compression >= 0) field("output_compression", std::to_string(provider.compression));
+    if (provider.stream) {
+        field("stream", "true");
+        field("partial_images", std::to_string(provider.partialImages));
+    }
     for (const auto& [key, value] : provider.extra.items()) {
         if (key == "model" || key == "prompt" || key == "image" || key == "image[]" ||
             key == provider.imageField || key == "n" || key == "stream")
             throw Error("扩展参数不能覆盖 model、prompt、image、n 或 stream");
-        if (key == "quality" || key == "size") throw Error("请通过对应选项设置 quality 和 size");
+        if (key == "quality" || key == "size" || key == "complexity" || key == "output_format" ||
+            key == "output_compression" || key == "partial_images")
+            throw Error("请通过对应选项设置 quality、size、complexity、返回格式、压缩率和局部预览数量");
         if (!value.is_null()) field(key, value.is_string() ? value.get<std::string>() : value.dump());
     }
     size_t index = 0;
@@ -108,9 +129,10 @@ Multipart multipart(const Provider& provider, const std::string& text, const std
     if (body.data.size() > 180 * 1024 * 1024) throw Error("上传请求超过 180 MB");
     return body;
 }
-struct Response { DWORD status; Bytes data; };
+struct Response { DWORD status; Bytes data; bool streamed = false; };
 static Response request(const std::wstring& url, const wchar_t* method, const std::wstring& headers,
-    const Bytes& body, int timeout, Cancel& cancel) {
+    const Bytes& body, int timeout, Cancel& cancel,
+    const std::function<void(const char*, size_t)>& onChunk = {}) {
     cancel.verify();
     URL_COMPONENTS parts{sizeof(URL_COMPONENTS)};
     parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
@@ -152,17 +174,33 @@ static Response request(const std::wstring& url, const wchar_t* method, const st
     DWORD status = 0, length = sizeof(status);
     if (!WinHttpQueryHeaders(handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_HEADER_NAME_BY_INDEX, &status, &length, WINHTTP_NO_HEADER_INDEX)) fail();
+    wchar_t contentType[256]{};
+    DWORD typeLength = sizeof(contentType);
+    bool streamed = onChunk && status >= 200 && status < 300 &&
+        WinHttpQueryHeaders(handle, WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_HEADER_NAME_BY_INDEX,
+            contentType, &typeLength, WINHTTP_NO_HEADER_INDEX) &&
+        _wcsnicmp(contentType, L"text/event-stream", 17) == 0;
     Bytes data; std::array<BYTE, 65536> buffer{};
+    size_t received = 0;
     for (;;) {
         cancel.verify();
+        DWORD readable = static_cast<DWORD>(buffer.size());
+        if (streamed) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(handle, &available)) fail();
+            if (!available) break;
+            readable = std::min(readable, available);
+        }
         DWORD count = 0;
-        if (!WinHttpReadData(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &count)) fail();
+        if (!WinHttpReadData(handle, buffer.data(), readable, &count)) fail();
         if (!count) break;
-        if (data.size() + count > 180 * 1024 * 1024) throw Error("响应超过 180 MB");
-        data.insert(data.end(), buffer.begin(), buffer.begin() + count);
+        received += count;
+        if (received > 180 * 1024 * 1024) throw Error("响应超过 180 MB");
+        if (streamed) onChunk(reinterpret_cast<const char*>(buffer.data()), count);
+        else data.insert(data.end(), buffer.begin(), buffer.begin() + count);
     }
     cancel.verify();
-    return {status, std::move(data)};
+    return {status, std::move(data), streamed};
 }
 static std::wstring authorization(const Provider& provider) {
     if (provider.key.empty()) throw Error("请填写 API Key");
@@ -209,12 +247,83 @@ std::vector<std::string> listModels(const Provider& provider, Cancel& cancel) {
     if (models.empty()) throw Error("供应商没有返回可用模型；仍可手动填写模型名称");
     return models;
 }
-Image edit(const Provider& provider, const std::string& text, const std::vector<Upload>& images, Cancel& cancel) {
+// SSE records can span any number of network reads, including between CR and LF.
+class ImageStream {
+    const Provider& provider;
+    const std::function<void(const Image&, int)>& preview;
+    std::string line, data, event;
+    bool skipLf = false, firstLine = true, ended = false;
+    void dispatch() {
+        if (data.empty()) { event.clear(); return; }
+        if (data == "[DONE]") { ended = true; data.clear(); event.clear(); return; }
+        Json value;
+        try { value = Json::parse(data); }
+        catch (...) { throw Error("供应商流式事件不是有效 JSON"); }
+        auto type = value.value("type", event);
+        if (value.contains("error") || type == "error") {
+            Json error{{"error", value.contains("error") ? value["error"] : value}};
+            auto serialized = error.dump();
+            jsonResponse({200, Bytes(serialized.begin(), serialized.end())}, provider);
+        }
+        if (!ended && (type == "image_edit.partial_image" || type == "image_generation.partial_image")) {
+            if (result.empty() && preview && value.contains("b64_json")) {
+                auto image = decode(unbase64(value.at("b64_json").get<std::string>()));
+                preview(image, value.value("partial_image_index", 0));
+            }
+        } else if (!ended && (type == "image_edit.completed" || type == "image_generation.completed")) {
+            if (!result.empty()) throw Error("供应商重复发送最终图像");
+            result = decode(unbase64(value.at("b64_json").get<std::string>()));
+        }
+        data.clear(); event.clear();
+    }
+    void finishLine() {
+        if (firstLine) {
+            if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);
+            firstLine = false;
+        }
+        if (line.empty()) dispatch();
+        else {
+            auto colon = line.find(':');
+            auto name = line.substr(0, colon);
+            auto value = colon == std::string::npos ? "" : line.substr(colon + 1);
+            if (!value.empty() && value.front() == ' ') value.erase(0, 1);
+            if (name == "event") event = std::move(value);
+            else if (name == "data") { if (!data.empty()) data += '\n'; data += value; }
+        }
+        line.clear();
+    }
+public:
+    Image result;
+    ImageStream(const Provider& settings, const std::function<void(const Image&, int)>& callback)
+        : provider(settings), preview(callback) {}
+    void feed(const char* bytes, size_t size) {
+        for (size_t i = 0; i < size; ++i) {
+            char c = bytes[i];
+            if (skipLf && c == '\n') { skipLf = false; continue; }
+            skipLf = false;
+            if (c == '\r' || c == '\n') { finishLine(); skipLf = c == '\r'; }
+            else line += c;
+            if (line.size() + data.size() > 72 * 1024 * 1024) throw Error("单个流式事件超过 72 MB");
+        }
+    }
+    Image finish() {
+        // A final event must have its blank-line terminator; truncated events are never saved.
+        if (result.empty()) throw Error("流式传输结束但未收到最终图像；局部预览不会作为成品保存");
+        return std::move(result);
+    }
+};
+Image edit(const Provider& provider, const std::string& text, const std::vector<Upload>& images, Cancel& cancel,
+    const std::function<void(const Image&, int)>& preview) {
     auto body = multipart(provider, text, images);
     auto headers = authorization(provider);
+    ImageStream stream(provider, preview);
     auto response = request(editUrl(provider.baseUrl), L"POST",
-        headers + L"\r\nContent-Type: " + wide(body.type),
-        body.data, provider.timeoutSeconds, cancel);
+        headers + L"\r\nContent-Type: " + wide(body.type) +
+            (provider.stream ? L"\r\nAccept: text/event-stream" : L""),
+        body.data, provider.timeoutSeconds, cancel, provider.stream ?
+            std::function<void(const char*, size_t)>([&](const char* bytes, size_t size) { stream.feed(bytes, size); }) :
+            std::function<void(const char*, size_t)>{});
+    if (response.streamed) return stream.finish();
     auto result = jsonResponse(response, provider);
     if (!result.contains("data") || !result["data"].is_array() || result["data"].empty())
         throw Error("供应商响应缺少 data[0] 图像");
