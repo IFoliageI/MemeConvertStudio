@@ -1,0 +1,7 @@
+/build/
+/bin/
+/tmp/
+/dist/
+/MemeStudio-Windows-x64.zip
+*.part
+*.memestudio/
