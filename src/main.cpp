@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "plugins.hpp"
 #include <shellapi.h>
 #include <iostream>
 
@@ -54,6 +55,11 @@ int wmain(int argc, wchar_t** argv) {
             if (count && count < 8192) job.provider.key = key;
             SecureZeroMemory(key, sizeof(key));
             job.stride = config.value("stride", 1); job.maxFrames = config.value("max_frames", 24);
+            job.generationCount = config.value("count", 1);
+            if (config.contains("plugins"))
+                job.plugins = std::make_shared<Plugins>(
+                    discoverPlugins(wide(config.value("plugin_directory", utf8(pluginDirectory().wstring())))),
+                    config["plugins"].get<std::vector<std::string>>());
             job.consistency = config.value("consistency", true);
             job.preserveText = config.value("preserve_text", true); job.resume = config.value("resume", true);
             job.instruction = wide(config.value("instruction", ""));
@@ -70,7 +76,8 @@ int wmain(int argc, wchar_t** argv) {
                 if (config.contains("progress_file"))
                     writeJson(wide(config["progress_file"].get<std::string>()),
                         {{"done", progress.done}, {"total", progress.total}, {"message", utf8(progress.message)},
-                         {"frame", progress.frame}, {"partial_image_index", progress.partial}});
+                         {"frame", progress.frame}, {"partial_image_index", progress.partial},
+                         {"copy_index", progress.copy}, {"count", progress.copies}});
             });
         } else {
             exitCode = runGui(GetModuleHandleW(nullptr), argc >= 3 && std::wstring(argv[1]) == L"--demo" ? argv[2] : fs::path{});

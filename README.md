@@ -8,17 +8,32 @@ Windows 原生 C++20 桌面程序，通过可自定义供应商的 OpenAI 兼容
 
 `MemeStudio-Windows-x64.zip` 包含可执行文件、全部 C++ 源码、测试和说明。重新打包可运行 `.\package.ps1`。
 
-1. 导入原始表情，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
-2. 导入人物截图或立绘。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
+1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
+2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
 3. 按需添加最多 8 张画风参考图，并填写附加要求。
 4. 填写供应商 Base URL、API Key 和模型名称。模型框可直接输入供应商的自定义模型名。
-5. 选择输出路径，点击“开始生成”。静态图导出 PNG，动画导出 GIF。
+5. 在参数底部设置生成张数，选择输出路径，点击“开始生成”。静态图导出 PNG，动画导出 GIF。
 
 模型框旁的“获取模型”会使用当前 Base URL 和 API Key 调用供应商的 `GET /models`，自动去重并填入下拉框，优先显示名称包含 `gpt-image` 的模型。支持输入完整编辑接口地址，保留原模型选择和手动输入；获取过程中可取消，失败时不清空已有选项。获取超时最多 30 秒。列表可能包含非图像模型，不代表所有模型都支持图片编辑。
 
 开始任务时会在日志中显示实际模型名称，自动清理模型名首尾空白，并在发送前拦截空名称。上传分隔符使用标准 MIME 字符，兼容严格解析 multipart 的服务。
 
 原图和生成结果可切换预览，支持播放、暂停和逐帧拖动。生成完成后可打开文件或所在目录。
+
+## 批量生成与插件
+
+“生成张数 / GIF 份数”支持 1–10，默认 1。每份独立串行生成，GIF 每份都是完整动画。
+单份沿用所选文件名，多份自动保存为 `名称_001.png`、`名称_002.png` 等，
+GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果”旁下拉选择各份成品。
+每份使用独立缓存，增加份数可复用已有的编号结果；从单份改为多份会使用新的编号路径。
+多次点击生成且保留“复用已完成帧”会恢复缓存；需要全新结果时关闭该选项。
+
+“原始表情”“参考人物”均支持从资源管理器拖入单个文件和中文路径。
+任务执行中不替换素材；文件无效时保留原选择，错误记录在日志中。
+
+参数底部“插件管理”支持扫描、启停插件及执行插件命令。插件可修改提示词、
+处理最终帧像素、追加或替换附加要求。附带默认关闭的示例插件和版本化 C ABI SDK。
+安装、开发和缓存规则详见 [PLUGINS.md](PLUGINS.md)。
 
 ## 供应商兼容
 
@@ -123,9 +138,13 @@ node .\tests\integration.mjs
 
 第一步构建程序并执行 C++ 本地测试；第二步需要 Node.js，仅用于运行模拟供应商集成测试，正式程序不依赖 Node.js。集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
 
-只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-next.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-next.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-next.exe`。
+只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-batch.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-batch.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-batch.exe`。
 
 流式与参数定向检查为 `node tests/streaming.mjs`，可通过 `--exe=D:\Projects\MemeStudio\bin\MemeStudio-next.exe` 指定构建产物；不调用真实供应商。
+
+批量与插件定向检查：`node tests/batch.mjs`。加 `--ui-only` 仅检查拖入文件、
+张数控件与插件管理命令，并生成界面截图。可通过 `--exe=绝对路径` 指定程序；
+使用现有 `tmp/tests` 示例素材，不调用真实供应商。
 
 也提供 CMake 工程：
 
@@ -156,6 +175,7 @@ Start-Process .\bin\MemeStudio.exe -ArgumentList @("--job", "D:\path\job.json") 
   "output": "D:/images/meme-edited.gif",
   "base_url": "https://your-provider.example/v1",
   "model": "gpt-image-1",
+  "count": 2,
   "api_key_env": "OPENAI_API_KEY",
   "quality": "auto",
   "complexity": "high",

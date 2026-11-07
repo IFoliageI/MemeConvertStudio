@@ -1,7 +1,9 @@
 #include "studio.hpp"
+#include "plugins.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <windowsx.h>
 #include <thread>
@@ -14,7 +16,7 @@
 namespace studio {
 namespace {
 constexpr UINT WM_PROGRESS = WM_APP + 1, WM_FINISHED = WM_APP + 2;
-constexpr int settingsHeight = 1176;
+constexpr int settingsHeight = 1210;
 constexpr COLORREF ink = RGB(34, 39, 43), muted = RGB(104, 113, 120);
 constexpr COLORREF paper = RGB(245, 247, 248), line = RGB(218, 224, 227);
 enum Id {
@@ -22,7 +24,8 @@ enum Id {
     BaseUrl, Key, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
     Consistency, PreserveText, Resume, Remember, Instruction, Output, BrowseOutput,
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
-    FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages
+    FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
+    GenerationCount, CountSpin, PluginManage, ResultChoice
 };
 struct State;
 struct View {
@@ -39,12 +42,13 @@ struct Completion {
     bool success = false, modelFetch = false;
     std::wstring message; fs::path output;
     std::vector<std::string> models;
+    std::vector<fs::path> outputs;
 };
 struct State {
     HINSTANCE instance{};
     HWND window{}, settings{}, sourceView{}, characterView{}, mainView{}, styles{},
         log{}, progress{}, status{}, estimate{}, timeline{}, instruction{}, output{},
-        sourcePath{}, characterPath{}, cropInfo{}, frameInfo{};
+        sourcePath{}, characterPath{}, cropInfo{}, frameInfo{}, resultChoice{};
     HFONT font{}, titleFont{}, smallFont{};
     HBRUSH background = CreateSolidBrush(paper), white = CreateSolidBrush(RGB(255, 255, 255));
     std::vector<HWND> lockControls;
@@ -52,6 +56,10 @@ struct State {
     std::shared_ptr<Image> previewImage;
     fs::path source, character, resultPath;
     std::vector<fs::path> stylePaths;
+    std::vector<fs::path> resultPaths;
+    std::vector<PluginInfo> availablePlugins;
+    std::vector<std::string> enabledPlugins;
+    std::shared_ptr<Plugins> plugins;
     Crop crop;
     View views[3];
     int frame = 0, elapsed = 0, scroll = 0;
@@ -112,7 +120,7 @@ struct State {
             int count = static_cast<int>(sourceAnimation.frames.size());
             int stride = number(Stride, 1, 600), maximum = number(MaxFrames, 0, 600);
             if (maximum) stride = std::max(stride, (count + maximum - 1) / maximum);
-            int calls = (count + stride - 1) / stride;
+            int calls = ((count + stride - 1) / stride) * number(GenerationCount, 1, 10);
             uint64_t duration = 0;
             for (auto& item : sourceAnimation.frames) duration += item.delayMs;
             std::wostringstream durationText;
@@ -230,6 +238,7 @@ static void drawImage(HDC target, const Image& image, RECT rect) {
         source, 0, 0, image.width, image.height, blend);
     SelectObject(source, old); DeleteDC(source); DeleteObject(dib);
 }
+static void dropFiles(State& state, HDROP drop, int kind);
 static LRESULT CALLBACK viewProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* view = reinterpret_cast<View*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
@@ -238,6 +247,9 @@ static LRESULT CALLBACK viewProcedure(HWND window, UINT message, WPARAM wparam, 
     }
     if (!view) return DefWindowProcW(window, message, wparam, lparam);
     auto& state = *view->state;
+    if (message == WM_DROPFILES) {
+        dropFiles(state, reinterpret_cast<HDROP>(wparam), view->kind); return 0;
+    }
     if (message == WM_CREATE) {
         GESTURECONFIG gestures[]{{GID_ZOOM, GC_ZOOM, 0},
             {GID_PAN, GC_PAN | GC_PAN_WITH_INERTIA, 0}};
@@ -468,6 +480,15 @@ static void createSettings(State& state) {
     checkbox(Consistency, L"多帧参考：动作、画风与背景一致", 950, true);
     checkbox(PreserveText, L"保留原表情文字", 984, true);
     checkbox(Resume, L"复用已完成帧，支持断点续作", 1018, true);
+    label(L"生成张数 / GIF 份数（1–10）", 1056);
+    auto count = editControl(GenerationCount, L"1", 1080, 28, ES_NUMBER);
+    auto spin = control(state, state.settings, UPDOWN_CLASSW, L"",
+        UDS_ALIGNRIGHT | UDS_SETBUDDYINT | UDS_ARROWKEYS, CountSpin, 0, 0, 20, 28, true);
+    SendMessageW(spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(count), 0);
+    SendMessageW(spin, UDM_SETRANGE32, 1, 10);
+    SendMessageW(spin, UDM_SETPOS32, 0, 1);
+    control(state, state.settings, L"BUTTON", L"插件管理…", WS_TABSTOP | BS_PUSHBUTTON,
+        PluginManage, 16, 1132, 292, 32, true);
 }
 static void updateProviderControls(State& state) {
     auto format = state.text(state.get(OutputFormat));
@@ -478,10 +499,11 @@ static void saveSettings(State& state) {
     if (state.demo) return;
     Json data;
     for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
-        Complexity, OutputFormat, Compression, PartialImages})
+        Complexity, OutputFormat, Compression, PartialImages, GenerationCount})
         data[std::to_string(id)] = utf8(state.text(state.get(id)));
     for (int id : {Consistency, PreserveText, Resume, Remember, Streaming}) data[std::to_string(id)] = state.checked(id);
     if (state.checked(Remember)) data["encrypted_key"] = protect(state.text(state.get(Key)));
+    data["enabled_plugins"] = state.enabledPlugins;
     writeJson(settingsPath(), data);
 }
 static void loadSettings(State& state) {
@@ -490,7 +512,7 @@ static void loadSettings(State& state) {
         if (!fs::exists(settingsPath())) return;
         Json data = readJson(settingsPath());
         for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
-            Complexity, OutputFormat, Compression, PartialImages}) {
+            Complexity, OutputFormat, Compression, PartialImages, GenerationCount}) {
             if (!data.contains(std::to_string(id))) continue;
             auto text = wide(data.at(std::to_string(id)).get<std::string>());
             HWND item = state.get(id);
@@ -503,6 +525,7 @@ static void loadSettings(State& state) {
             if (data.contains(std::to_string(id))) state.checkBox(id, data[std::to_string(id)].get<bool>());
         if (state.checked(Remember) && data.contains("encrypted_key"))
             state.set(state.get(Key), unprotect(data["encrypted_key"].get<std::string>()));
+        state.enabledPlugins = data.value("enabled_plugins", std::vector<std::string>{});
     } catch (const std::exception& error) {
         state.logLine(L"读取设置失败：" + wide(error.what()));
     }
@@ -511,6 +534,8 @@ static void loadSource(State& state, const fs::path& path) {
     auto animation = decode(path);
     state.source = path; state.sourceAnimation = std::move(animation);
     state.resultAnimation = {}; state.resultPath.clear();
+    state.resultPaths.clear(); SendMessageW(state.resultChoice, CB_RESETCONTENT, 0, 0);
+    ShowWindow(state.resultChoice, SW_HIDE);
     state.previewImage.reset();
     state.set(state.sourcePath, path.filename().wstring());
     fs::path output = path.parent_path() / (path.stem().wstring() + L"-edited" +
@@ -525,7 +550,203 @@ static void loadCharacter(State& state, const fs::path& path) {
     state.character = path; state.characterAnimation = std::move(animation); state.crop = {};
     state.set(state.characterPath, path.filename().wstring());
     state.set(state.cropInfo, L"完整参考图");
+    state.views[1].zoom = 1; state.views[1].panX = state.views[1].panY = 0;
     InvalidateRect(state.characterView, nullptr, FALSE);
+}
+static void dropFiles(State& state, HDROP drop, int kind) {
+    struct Finish { HDROP drop; ~Finish() { DragFinish(drop); } } finish{drop};
+    try {
+        if (state.busy) throw Error("任务进行中，请在结束后拖入图片");
+        if (kind == -1) {
+            POINT point{}; DragQueryPoint(drop, &point);
+            if (point.x < 16 || point.x > 258) return;
+            kind = point.y >= 66 && point.y <= 260 ? 0 :
+                point.y >= 274 && point.y <= 500 ? 1 : -1;
+        }
+        if (kind != 0 && kind != 1) return;
+        if (DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) != 1)
+            throw Error("每个选图区域请一次拖入一个文件");
+        UINT size = DragQueryFileW(drop, 0, nullptr, 0);
+        std::wstring path(size + 1, L'\0');
+        if (!DragQueryFileW(drop, 0, path.data(), size + 1)) throw Error("无法读取拖入的文件");
+        path.resize(size);
+        if (kind == 0) loadSource(state, fs::path(path)); else loadCharacter(state, fs::path(path));
+        state.set(state.status, kind == 0 ? L"已载入原始表情" : L"已载入参考人物");
+    } catch (const std::exception& error) {
+        state.set(state.status, L"拖入失败"); state.logLine(wide(error.what()));
+    }
+}
+static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
+    state.plugins.reset();
+    state.enabledPlugins.clear();
+    auto logger = [window = state.window](const std::wstring& message) {
+        auto event = std::make_unique<Progress>();
+        event->message = L"插件：" + message;
+        if (IsWindow(window) && PostMessageW(window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(event.get())))
+            event.release();
+    };
+    state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger);
+    state.enabledPlugins = enabled;
+}
+enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, PluginFolder, PluginApply };
+struct PluginDialog {
+    State* state;
+    HWND list{}, commands{};
+    bool capture = false;
+    std::string failure;
+};
+static void fillPluginCommands(PluginDialog& dialog) {
+    SendMessageW(dialog.commands, CB_RESETCONTENT, 0, 0);
+    int selected = ListView_GetNextItem(dialog.list, -1, LVNI_SELECTED);
+    if (selected >= 0 && size_t(selected) < dialog.state->availablePlugins.size())
+        for (const auto& command : dialog.state->availablePlugins[selected].commands)
+        SendMessageW(dialog.commands, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(command.title.c_str()));
+    SendMessageW(dialog.commands, CB_SETCURSEL, 0, 0);
+}
+static std::vector<std::string> selectedPlugins(PluginDialog& dialog) {
+    std::vector<std::string> enabled;
+    for (int i = 0; i < int(dialog.state->availablePlugins.size()); ++i)
+        if (ListView_GetCheckState(dialog.list, i)) {
+            const auto& info = dialog.state->availablePlugins[i];
+            if (!info.error.empty()) throw Error(info.error);
+            enabled.push_back(info.id);
+        }
+    return enabled;
+}
+static void fillPluginList(PluginDialog& dialog, const std::vector<std::string>& enabled) {
+    ListView_DeleteAllItems(dialog.list);
+    for (int i = 0; i < int(dialog.state->availablePlugins.size()); ++i) {
+        const auto& info = dialog.state->availablePlugins[i];
+        LVITEMW item{}; item.mask = LVIF_TEXT; item.iItem = i; item.pszText = const_cast<LPWSTR>(info.name.c_str());
+        ListView_InsertItem(dialog.list, &item);
+        auto version = wide(info.version);
+        auto description = info.error.empty() ? info.description : L"不可用：" + wide(info.error);
+        ListView_SetItemText(dialog.list, i, 1, version.data());
+        ListView_SetItemText(dialog.list, i, 2, description.data());
+        ListView_SetCheckState(dialog.list, i,
+            std::find(enabled.begin(), enabled.end(), info.id) != enabled.end());
+    }
+    fillPluginCommands(dialog);
+}
+static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* dialog = reinterpret_cast<PluginDialog*>(GetWindowLongPtrW(window, DWLP_USER));
+    try {
+        if (message == WM_INITDIALOG) {
+            dialog = reinterpret_cast<PluginDialog*>(lparam);
+            SetWindowLongPtrW(window, DWLP_USER, reinterpret_cast<LONG_PTR>(dialog));
+            auto& state = *dialog->state;
+            SetWindowTextW(window, L"插件管理");
+            SetWindowPos(window, nullptr, 0, 0, 748, 432, SWP_NOMOVE | SWP_NOZORDER);
+            RECT owner{}, rect{}; GetWindowRect(state.window, &owner); GetWindowRect(window, &rect);
+            SetWindowPos(window, nullptr, owner.left + (owner.right - owner.left - rect.right + rect.left) / 2,
+                owner.top + (owner.bottom - owner.top - rect.bottom + rect.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            auto add = [&](const wchar_t* type, const wchar_t* label, DWORD style, int id,
+                int x, int y, int width, int height) {
+                return control(state, window, type, label, style, id, x, y, width, height);
+            };
+            dialog->list = add(WC_LISTVIEWW, L"", WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_SINGLESEL |
+                LVS_SHOWSELALWAYS, PluginList, 16, 16, 700, 254);
+            ListView_SetExtendedListViewStyle(dialog->list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            const wchar_t* titles[]{L"插件", L"版本", L"说明 / 状态"};
+            int widths[]{200, 85, 385};
+            for (int i = 0; i < 3; ++i) {
+                LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH;
+                column.pszText = const_cast<LPWSTR>(titles[i]); column.cx = widths[i];
+                ListView_InsertColumn(dialog->list, i, &column);
+            }
+            dialog->commands = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                PluginCommands, 16, 284, 526, 180);
+            add(L"BUTTON", L"执行命令", WS_TABSTOP | BS_PUSHBUTTON, PluginRun, 554, 284, 162, 30);
+            add(L"BUTTON", L"打开目录", WS_TABSTOP | BS_PUSHBUTTON, PluginFolder, 16, 342, 100, 32);
+            add(L"BUTTON", L"重新扫描", WS_TABSTOP | BS_PUSHBUTTON, PluginRescan, 128, 342, 100, 32);
+            add(L"BUTTON", L"应用", WS_TABSTOP | BS_PUSHBUTTON, PluginApply, 504, 342, 100, 32);
+            add(L"BUTTON", L"关闭", WS_TABSTOP | BS_DEFPUSHBUTTON, IDCANCEL, 616, 342, 100, 32);
+            fillPluginList(*dialog, state.enabledPlugins);
+            if (dialog->capture) PostMessageW(window, WM_APP + 7, 0, 0);
+            return TRUE;
+        }
+        if (!dialog) return FALSE;
+        auto& state = *dialog->state;
+        if (message == WM_APP + 7 && dialog->capture) {
+            if (ListView_GetItemCount(dialog->list) != int(state.availablePlugins.size()))
+                throw Error("Plugin manager list failed");
+            auto found = std::find_if(state.availablePlugins.begin(), state.availablePlugins.end(),
+                [](const auto& info) { return info.id == "memestudio.example"; });
+            if (found == state.availablePlugins.end()) throw Error("Example plugin missing from manager");
+            int index = int(found - state.availablePlugins.begin());
+            ListView_SetItemState(dialog->list, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_SetCheckState(dialog->list, index, TRUE);
+            SendMessageW(window, WM_COMMAND, PluginRun, 0);
+            if (!dialog->failure.empty()) return TRUE;
+            if (state.text(state.instruction).find(L"Maintain consistent character identity") == std::wstring::npos)
+                throw Error("Plugin manager command action failed");
+            EndDialog(window, IDOK); return TRUE;
+        }
+        if (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lparam)->idFrom == PluginList) {
+            if (reinterpret_cast<NMHDR*>(lparam)->code == LVN_ITEMCHANGED) fillPluginCommands(*dialog);
+            return FALSE;
+        }
+        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message != WM_COMMAND) return FALSE;
+        switch (LOWORD(wparam)) {
+        case IDCANCEL: EndDialog(window, IDCANCEL); return TRUE;
+        case PluginFolder: {
+            auto directory = pluginDirectory(); fs::create_directories(directory);
+            ShellExecuteW(window, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL); return TRUE;
+        }
+        case PluginRescan: {
+            auto enabled = selectedPlugins(*dialog);
+            state.availablePlugins = discoverPlugins(pluginDirectory());
+            fillPluginList(*dialog, enabled); return TRUE;
+        }
+        case PluginApply:
+            applyPlugins(state, selectedPlugins(*dialog)); saveSettings(state);
+            state.logLine(L"插件设置已应用"); return TRUE;
+        case PluginRun: {
+            int selected = ListView_GetNextItem(dialog->list, -1, LVNI_SELECTED);
+            int commandIndex = int(SendMessageW(dialog->commands, CB_GETCURSEL, 0, 0));
+            if (selected < 0 || commandIndex < 0) throw Error("请选择插件和命令");
+            auto info = state.availablePlugins[selected];
+            applyPlugins(state, selectedPlugins(*dialog)); saveSettings(state);
+            Json context{{"source", utf8(state.source.wstring())}, {"character", utf8(state.character.wstring())},
+                {"output", utf8(state.text(state.output))}, {"instruction", utf8(state.text(state.instruction))}};
+            auto result = state.plugins->command(info.id, info.commands.at(commandIndex).id, context, window);
+            if (result.contains("instruction"))
+                state.set(state.instruction, wide(result.at("instruction").get<std::string>()));
+            if (result.contains("append_instruction")) {
+                auto current = state.text(state.instruction);
+                state.set(state.instruction, current + (current.empty() ? L"" : L"\r\n") +
+                    wide(result.at("append_instruction").get<std::string>()));
+            }
+            state.logLine(L"已执行插件命令：" + info.commands.at(commandIndex).title); return TRUE;
+        }
+        }
+    } catch (const std::exception& error) {
+        if (dialog && dialog->capture) {
+            dialog->failure = error.what(); EndDialog(window, IDABORT); return TRUE;
+        }
+        MessageBoxW(window, wide(error.what()).c_str(), L"插件", MB_OK | MB_ICONERROR);
+    }
+    return FALSE;
+}
+static void managePlugins(State& state, bool capture = false) {
+    if (state.busy) return;
+    state.availablePlugins = discoverPlugins(pluginDirectory());
+    PluginDialog dialog{&state};
+    dialog.capture = capture;
+    struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
+    resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
+    resource.dialog.cx = 460; resource.dialog.cy = 260;
+    auto result = DialogBoxIndirectParamW(state.instance, &resource.dialog, state.window, pluginProcedure,
+        reinterpret_cast<LPARAM>(&dialog));
+    if (result == -1) throw Error("无法打开插件管理窗口");
+    if (!dialog.failure.empty()) throw Error(dialog.failure);
+}
+static void selectResult(State& state, size_t index) {
+    auto path = state.resultPaths.at(index);
+    auto animation = decode(path);
+    state.previewImage.reset(); state.resultAnimation = std::move(animation);
+    state.resultPath = path; state.showingResult = true; state.refreshViews();
 }
 static void fetchModels(State& state) {
     if (state.busy) return;
@@ -562,6 +783,8 @@ static void start(State& state) {
     job.stride = state.number(Stride, 1, 600); job.maxFrames = state.number(MaxFrames, 0, 600);
     job.consistency = state.checked(Consistency); job.preserveText = state.checked(PreserveText);
     job.resume = state.checked(Resume);
+    job.generationCount = state.number(GenerationCount, 1, 10);
+    job.plugins = state.plugins;
     job.provider.baseUrl = state.text(state.get(BaseUrl)); job.provider.key = state.text(state.get(Key));
     job.provider.model = utf8(state.text(state.get(Model))); job.provider.quality = utf8(state.text(state.get(Quality)));
     auto modelBegin = job.provider.model.find_first_not_of(" \t\r\n");
@@ -592,8 +815,11 @@ static void start(State& state) {
         auto path = chooseOutput(state); if (path.empty()) return;
         job.output = path; state.set(state.output, path.wstring());
     }
-    if (fs::exists(job.output) && MessageBoxW(state.window,
-        (L"输出文件已存在，生成完成后将替换：\n" + job.output.wstring()).c_str(),
+    auto outputs = outputPaths(job);
+    std::wstring existing;
+    for (const auto& path : outputs) if (fs::exists(path)) existing += L"\n" + path.wstring();
+    if (!existing.empty() && MessageBoxW(state.window,
+        (L"以下输出文件已存在，生成完成后将替换：" + existing).c_str(),
         L"替换输出文件", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
     state.cancel.reset(); state.busy = true;
     for (auto control : state.lockControls) EnableWindow(control, FALSE);
@@ -612,8 +838,8 @@ static void start(State& state) {
                 auto event = std::make_unique<Progress>(progress);
                 if (PostMessageW(state.window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(event.get()))) event.release();
             });
-            completion->success = true; completion->output = job.output;
-            completion->message = L"生成完成";
+            completion->outputs = outputPaths(job); completion->success = true;
+            completion->message = L"生成完成，共 " + std::to_wstring(job.generationCount) + L" 份";
         } catch (const std::exception& error) {
             completion->success = false; completion->message = wide(error.what());
         }
@@ -628,6 +854,7 @@ static void layout(State& state) {
     int middleX = left + 30, middleWidth = width - middleX - right - 38;
     MoveWindow(GetDlgItem(state.window, SourceTab), middleX, 68, 82, 30, TRUE);
     MoveWindow(GetDlgItem(state.window, ResultTab), middleX + 90, 68, 82, 30, TRUE);
+    MoveWindow(state.resultChoice, middleX + 180, 68, std::max(64, middleWidth - 336), 200, TRUE);
     MoveWindow(GetDlgItem(state.window, OpenResult), middleX + middleWidth - 146, 68, 70, 30, TRUE);
     MoveWindow(GetDlgItem(state.window, OpenFolder), middleX + middleWidth - 70, 68, 70, 30, TRUE);
     int canvasBottom = height - 302;
@@ -675,6 +902,8 @@ static void initialize(State& state) {
         16, 342, 242, 158, state.window, nullptr, state.instance, &state.views[1]);
     state.mainView = CreateWindowExW(0, L"MemeStudioView", L"工作区预览", WS_CHILD | WS_VISIBLE,
         288, 110, 500, 420, state.window, nullptr, state.instance, &state.views[2]);
+    DragAcceptFiles(state.window, TRUE);
+    DragAcceptFiles(state.sourceView, TRUE); DragAcceptFiles(state.characterView, TRUE);
     state.cropInfo = label(L"完整参考图", 16, 510, 155);
     button(ClearCrop, L"重置裁剪", 176, 504, 82);
     label(L"画风参考", 16, 550, 100);
@@ -687,6 +916,9 @@ static void initialize(State& state) {
         WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
         Instruction, 16, 686, 242, 100, true);
     button(SourceTab, L"原图", 0, 0, 82, false); button(ResultTab, L"结果", 0, 0, 82, false);
+    state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
+        WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
+    ShowWindow(state.resultChoice, SW_HIDE);
     button(OpenResult, L"打开", 0, 0, 70, false); button(OpenFolder, L"目录", 0, 0, 70, false);
     button(Play, L"暂停", 0, 0, 64, false);
     state.timeline = control(state, state.window, TRACKBAR_CLASSW, L"",
@@ -707,6 +939,10 @@ static void initialize(State& state) {
     state.settings = CreateWindowExW(WS_EX_CONTROLPARENT, L"MemeStudioSettings", L"供应商和生成参数",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL, 850, 60, 332, 760, state.window, nullptr, state.instance, &state);
     createSettings(state); loadSettings(state); updateProviderControls(state);
+    try {
+        state.availablePlugins = discoverPlugins(pluginDirectory());
+        auto enabled = state.enabledPlugins; applyPlugins(state, enabled);
+    } catch (const std::exception& error) { state.logLine(L"插件未启用：" + wide(error.what())); }
     HWND tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
         WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         CW_USEDEFAULT, state.window, nullptr, state.instance, nullptr);
@@ -733,7 +969,13 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
-    if ((id == Stride || id == MaxFrames) && notification == EN_CHANGE) { state.updateEstimate(); return; }
+    if ((id == Stride || id == MaxFrames || id == GenerationCount) && notification == EN_CHANGE) { state.updateEstimate(); return; }
+    if (id == PluginManage) { managePlugins(state); return; }
+    if (id == ResultChoice && notification == CBN_SELCHANGE) {
+        auto selected = SendMessageW(state.resultChoice, CB_GETCURSEL, 0, 0);
+        if (selected != CB_ERR && !state.busy) selectResult(state, size_t(selected));
+        return;
+    }
     if ((id == OutputFormat && notification == CBN_SELCHANGE) ||
         (id == Streaming && notification == BN_CLICKED)) { updateProviderControls(state); return; }
     if (id == Source || id == Character) {
@@ -791,6 +1033,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
         }
         case WM_SIZE: if (state->settings) layout(*state); return 0;
         case WM_COMMAND: command(*state, LOWORD(wparam), HIWORD(wparam)); return 0;
+        case WM_DROPFILES: dropFiles(*state, reinterpret_cast<HDROP>(wparam), -1); return 0;
         case WM_HSCROLL:
             state->frame = static_cast<int>(SendMessageW(state->timeline, TBM_GETPOS, 0, 0));
             state->elapsed = 0; state->updateFrameLabel();
@@ -817,7 +1060,8 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
                     InvalidateRect(state->mainView, nullptr, FALSE);
                     state->set(state->frameInfo, progress->partial >= 0 ?
                         L"局部 " + std::to_wstring(progress->partial + 1) :
-                        std::to_wstring(progress->frame + 1) + L" / " + std::to_wstring(progress->total));
+                        std::to_wstring(progress->frame + 1) + L" / " +
+                        std::to_wstring(progress->total / std::max(1, progress->copies)));
                 }
             }
             state->logLine(progress->message); return 0;
@@ -860,9 +1104,15 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
                 state->cancel.stopped ? L"已取消，可继续生成" : L"任务失败，已保留完成帧");
             state->logLine(completion->message);
             if (completion->success) {
-                state->previewImage.reset();
-                state->resultAnimation = decode(completion->output); state->resultPath = completion->output;
-                state->showingResult = true; state->refreshViews();
+                state->resultPaths = completion->outputs;
+                SendMessageW(state->resultChoice, CB_RESETCONTENT, 0, 0);
+                for (size_t i = 0; i < state->resultPaths.size(); ++i) {
+                    auto label = L"第 " + std::to_wstring(i + 1) + L" 份";
+                    SendMessageW(state->resultChoice, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+                }
+                SendMessageW(state->resultChoice, CB_SETCURSEL, 0, 0);
+                ShowWindow(state->resultChoice, state->resultPaths.size() > 1 ? SW_SHOW : SW_HIDE);
+                selectResult(*state, 0);
             } else if (!state->closing && !state->cancel.stopped) {
                 MessageBoxW(window, completion->message.c_str(), L"生成未完成", MB_OK | MB_ICONERROR);
             }
@@ -894,7 +1144,8 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
 }
 int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
     State state; state.instance = instance; state.demo = !demo.empty();
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_PROGRESS_CLASS};
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES |
+        ICC_PROGRESS_CLASS | ICC_UPDOWN_CLASS | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&controls);
     WNDCLASSEXW type{sizeof(type)}; type.hInstance = instance;
     type.hCursor = LoadCursorW(nullptr, IDC_ARROW); type.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
@@ -944,6 +1195,53 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             report["snapshots"].push_back({{"width", width}, {"height", height}, {"file", utf8(filename)}});
         };
         snapshot(1280, 900, L"ui-wide.png");
+        snapshot(1120, 830, L"ui-compact.png");
+        auto drop = [&](HWND target, const fs::path& path) {
+            auto name = path.wstring();
+            HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT,
+                sizeof(DROPFILES) + (name.size() + 2) * sizeof(wchar_t));
+            if (!memory) throw Error("Cannot allocate drop fixture");
+            auto* files = static_cast<DROPFILES*>(GlobalLock(memory));
+            if (!files) { GlobalFree(memory); throw Error("Cannot lock drop fixture"); }
+            files->pFiles = sizeof(DROPFILES); files->fWide = TRUE;
+            memcpy(reinterpret_cast<BYTE*>(files) + sizeof(DROPFILES), name.c_str(),
+                (name.size() + 1) * sizeof(wchar_t));
+            GlobalUnlock(memory);
+            SendMessageW(target, WM_DROPFILES, reinterpret_cast<WPARAM>(memory), 0);
+        };
+        drop(state.characterView, demo / L"中文路径-人物.png");
+        if (state.character.filename() != L"中文路径-人物.png") throw Error("Unicode reference drop failed");
+        auto character = state.character;
+        drop(state.characterView, demo / L"missing.png");
+        if (state.character != character) throw Error("Invalid drop replaced reference");
+        state.busy = true;
+        drop(state.characterView, demo / L"character.png");
+        state.busy = false;
+        if (state.character != character) throw Error("Busy drop replaced reference");
+        drop(state.characterView, demo / L"character.png");
+        drop(state.sourceView, demo / L"source.png");
+        if (state.source.filename() != L"source.png") throw Error("Source drop failed");
+        drop(state.sourceView, demo / L"source.gif");
+        state.set(state.get(GenerationCount), L"3");
+        if (state.number(GenerationCount, 1, 10) != 3 ||
+            state.text(state.estimate).find(L"次生成请求") == std::wstring::npos)
+            throw Error("Generation count control failed");
+        state.set(state.get(GenerationCount), L"1");
+        report["drop_and_count"] = "passed";
+        if (!state.plugins || !state.plugins->fingerprint().empty())
+            throw Error("Plugins must be disabled by default");
+        auto savedInstruction = state.text(state.instruction);
+        applyPlugins(state, {"memestudio.example"});
+        if (state.plugins->fingerprint().size() != 1 ||
+            state.plugins->transform(Json::object(), "base") == "base")
+            throw Error("Plugin load or prompt hook failed");
+        auto action = state.plugins->command("memestudio.example", "identity-note", Json::object(), window);
+        if (!action.contains("append_instruction")) throw Error("Plugin command failed");
+        managePlugins(state, true);
+        applyPlugins(state, {});
+        state.set(state.instruction, savedInstruction);
+        report["plugin_hooks"] = "passed";
+        // Repaint after imports so crop coordinates refer to the current reference image.
         snapshot(1120, 830, L"ui-compact.png");
         // Exercise the window's own crop handler using its rendered image bounds.
         const auto bounds = state.views[1].imageRect;

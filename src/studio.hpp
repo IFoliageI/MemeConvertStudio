@@ -92,6 +92,7 @@ Image edit(const Provider& provider, const std::string& prompt,
            const std::vector<Upload>& images, Cancel& cancel,
            const std::function<void(const Image&, int)>& preview = {});
 
+class Plugins;
 struct Job {
     Provider provider;
     fs::path source, character, output;
@@ -100,6 +101,8 @@ struct Job {
     std::wstring instruction;
     int stride = 1;
     int maxFrames = 0;
+    int generationCount = 1, copyIndex = 0;
+    std::shared_ptr<Plugins> plugins;
     bool consistency = true;
     bool preserveText = true;
     bool resume = true;
@@ -109,11 +112,13 @@ struct Progress {
     std::wstring message;
     std::shared_ptr<Image> preview;
     int frame = -1, partial = -1;
+    int copy = 0, copies = 1;
 };
 using Reporter = std::function<void(const Progress&)>;
 std::string prompt(const Job& job, int index, int total, size_t styleCount, bool anchor,
                    const std::vector<int>& neighbors = {});
 void runJob(const Job& job, Cancel& cancel, const Reporter& report);
+std::vector<fs::path> outputPaths(const Job& job);
 int runGui(HINSTANCE instance, const fs::path& demo = {}, bool capture = false);
 int selfTest(const fs::path& directory);
 int networkTest(const fs::path& directory, const std::wstring& base);

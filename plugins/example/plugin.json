@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "memestudio.example",
+  "name": "Example extension",
+  "version": "1.0.0",
+  "description": "Demonstrates prompt, frame and command extension points.",
+  "library": "example.dll",
+  "commands": [
+    { "id": "identity-note", "title": "Add identity consistency instruction" }
+  ]
+}

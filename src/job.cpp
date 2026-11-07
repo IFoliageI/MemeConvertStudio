@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "plugins.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <sstream>
@@ -51,7 +52,20 @@ std::string prompt(const Job& job, int index, int total, size_t styleCount, bool
     if (!job.instruction.empty()) text += "\nAdditional user instructions:\n" + utf8(job.instruction);
     return text;
 }
-void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
+std::vector<fs::path> outputPaths(const Job& job) {
+    if (job.generationCount < 1 || job.generationCount > 10) throw Error("生成张数必须在 1 到 10 之间");
+    if (job.output.empty() || !job.output.has_filename()) throw Error("请选择输出文件");
+    if (job.generationCount == 1) return {job.output};
+    std::vector<fs::path> paths;
+    for (int i = 0; i < job.generationCount; ++i) {
+        std::wostringstream name;
+        name << job.output.stem().wstring() << L"_" << std::setw(3) << std::setfill(L'0') << i + 1
+            << job.output.extension().wstring();
+        paths.push_back(job.output.parent_path() / name.str());
+    }
+    return paths;
+}
+static void runSingleJob(const Job& job, Cancel& cancel, const Reporter& report) {
     cancel.verify();
     if (job.stride < 1 || job.stride > 600 || job.maxFrames < 0 || job.maxFrames > 600)
         throw Error("无效的 GIF 抽帧参数");
@@ -90,6 +104,8 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
         {"temporal_reference", {{"per_side", 2}, {"edge", 1024}, {"order", "midpoints"}}}
     };
     for (size_t i = 1; i < refs.size(); ++i) manifest["styles"].push_back(digest(refs[i].data));
+    if (job.copyIndex) manifest["variation"] = job.copyIndex;
+    if (job.plugins && !job.plugins->fingerprint().empty()) manifest["plugins"] = job.plugins->fingerprint();
     auto serialized = manifest.dump();
     std::string signature = digest(Bytes(serialized.begin(), serialized.end()));
     fs::path cache = output; cache += L".memestudio";
@@ -150,11 +166,16 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
                     uploads.push_back({"temporal", png(limited(generated[i].image, 1024))});
             }
             if (hasAnchor) uploads.push_back({"anchor", anchor});
+            Json context{{"source", utf8(job.source.wstring())}, {"character", utf8(job.character.wstring())},
+                {"output", utf8(output.wstring())}, {"frame_index", frameIndex}, {"frame_count", total},
+                {"source_frame_index", sourceIndex}, {"variation_index", job.copyIndex},
+                {"instruction", utf8(job.instruction)}};
+            auto text = prompt(job, frameIndex, total, job.styles.size(), hasAnchor, neighbors);
+            if (job.plugins) text = job.plugins->transform(context, std::move(text));
             report({completed, total, L"正在生成第 " + std::to_wstring(frameIndex + 1) +
                 L" / " + std::to_wstring(total) + L" 帧（前参考 " + std::to_wstring(before) +
                 L"，后参考 " + std::to_wstring(after) + L"）…", {}, frameIndex});
-            result = edit(job.provider, prompt(job, frameIndex, total, job.styles.size(), hasAnchor, neighbors),
-                uploads, cancel, [&](const Image& image, int partialIndex) {
+            result = edit(job.provider, text, uploads, cancel, [&](const Image& image, int partialIndex) {
                     cancel.verify();
                     report({completed, total, L"第 " + std::to_wstring(frameIndex + 1) +
                         L" 帧：收到局部预览 " + std::to_wstring(partialIndex + 1),
@@ -162,6 +183,8 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
                 });
             cancel.verify();
             result = resized(result, original.width, original.height);
+            if (job.plugins) job.plugins->process(context, result);
+            cancel.verify();
             savePng(framePath, result);
         } else {
             report({completed, total, L"已恢复缓存帧 " + std::to_wstring(frameIndex + 1)});
@@ -182,5 +205,36 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
     if (animation.animated) saveGif(output, generated, animation.loop);
     else savePng(output, generated.front().image);
     report({total, total, L"完成：" + output.wstring()});
+}
+void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
+    cancel.verify();
+    auto paths = outputPaths(job);
+    std::vector<fs::path> inputs{job.source, job.character};
+    inputs.insert(inputs.end(), job.styles.begin(), job.styles.end());
+    // Check every numbered destination before generating or overwriting any result.
+    for (const auto& path : paths) for (const auto& input : inputs) {
+        if (input.empty() || !fs::is_regular_file(input)) throw Error("输入图片不存在");
+        if (_wcsicmp(fs::absolute(path).lexically_normal().c_str(),
+            fs::absolute(input).lexically_normal().c_str()) == 0 ||
+            (fs::exists(path) && fs::equivalent(path, input)))
+            throw Error("输出文件不能覆盖输入素材或参考图");
+    }
+    int knownTotal = 0;
+    for (int i = 0; i < job.generationCount; ++i) {
+        cancel.verify();
+        Job copy = job; copy.output = paths[i]; copy.copyIndex = i; copy.generationCount = 1;
+        runSingleJob(copy, cancel, [&](const Progress& progress) {
+            auto event = progress;
+            event.copy = i; event.copies = job.generationCount;
+            if (progress.total) knownTotal = progress.total;
+            if (job.generationCount > 1) {
+                event.done = i * knownTotal + progress.done;
+                event.total = job.generationCount * knownTotal;
+                event.message = L"第 " + std::to_wstring(i + 1) + L" / " +
+                    std::to_wstring(job.generationCount) + L" 份：" + progress.message;
+            }
+            report(event);
+        });
+    }
 }
 }
