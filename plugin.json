@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "memestudio.local-redraw",
+  "name": "局部重绘",
+  "version": "1.0.0",
+  "description": "通过提示词和新的画风参考修正已有产物，支持矩形选区与完整 GIF。",
+  "library": "local-redraw.dll",
+  "commands": [
+    {"id": "refine-result", "title": "局部重绘当前产物…"}
+  ]
+}
