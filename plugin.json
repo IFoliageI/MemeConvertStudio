@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "memestudio.waifu2x",
+  "name": "Waifu2x 输入/输出超分",
+  "version": "1.0.0",
+  "description": "调用外部 waifu2x-ncnn-vulkan，可选输入或输出超分，不内置程序或模型。",
+  "library": "waifu2x.dll",
+  "commands": [
+    {"id": "configure-upscale", "title": "设置输入/输出超分…"}
+  ]
+}
