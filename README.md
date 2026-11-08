@@ -165,6 +165,10 @@ node .\tests\integration.mjs
 `node tests/batch.mjs --exe=D:\Projects\MemeStudio\bin\MemeStudio-plugins.exe --ui-only`
 可检查两个插件窗口，并在 `tmp/tests` 生成 `ui-refine.png` 等截图。
 
+已安装真实工具时，可运行
+`node tests/waifu-real.mjs --tool=D:\Projects\waifu2x-ncnn-vulkan-20250915-windows`。
+该检查会实际调用本机 Waifu2x，但图像生成仍使用本机模拟服务。
+
 也提供 CMake 工程：
 
 ```powershell
