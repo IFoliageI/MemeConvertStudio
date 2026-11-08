@@ -1,14 +1,18 @@
-# 表情重绘 · Meme Studio
+# MemeConvertStudio
 
-Windows 原生 C++20 桌面程序，通过可自定义供应商的 OpenAI 兼容图像编辑接口，把原表情中的主体替换成参考人物，并允许加入多张画风参考图。
+MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具。它通过可配置供应商的 OpenAI 兼容图像编辑接口，将原表情主体替换为截图或立绘中的人物，并保留原动作、构图和背景；也可添加画风参考、组合中文提示预设、逐帧处理 GIF，或通过插件进行局部重绘与可选超分。
 
 ## 启动
 
-双击 `bin\MemeStudio.exe`。支持 Windows 10/11 x64；使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外的运行时安装。
+支持 Windows 10/11 x64。获取源码后，在 Visual Studio Developer PowerShell 中运行：
 
-`MemeStudio-Windows-x64.zip` 包含可执行文件、全部 C++ 源码、测试和说明。重新打包可运行 `.\package.ps1`。
-`MemeStudio-Plugins.zip` 单独包含插件 DLL、清单及说明，解压到新版 EXE 所在目录。
-局部重绘与超分的宿主服务需要本次新版程序，旧版仅替换 DLL 无法提供完整功能。
+```powershell
+.\build.ps1
+```
+
+构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
+
+插件 SDK、插件源码和开发说明也包含在 `main` 分支；独立 `plugins` 分支便于单独浏览插件源码、清单和 DLL。局部重绘与超分需要新版宿主程序，单独替换 DLL 不能为旧版增加宿主功能。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -60,6 +64,10 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
   不内置或安装第三方程序。输出超分放大实际成品，且可复用已有 API 帧缓存。
 
 局部重绘、超分的配置及命令行示例见 [PLUGINS.md](PLUGINS.md)。
+
+### 插件分支
+
+GitHub 的 `plugins` 分支单独汇集插件源码、清单、C ABI SDK、开发说明和 Windows x64 DLL，方便独立获取插件文件。完整应用构建仍以 `main` 分支为准；第三方插件应遵守 SDK 的版本和 ABI 约定。
 
 ## 供应商兼容
 
@@ -159,10 +167,15 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 
 ```powershell
 .\build.ps1 -Test
+```
+
+`.\build.ps1` 构建程序和插件；添加 `-Test` 会运行 C++ 本地测试。模拟供应商集成测试需要 Node.js，仅用于测试，正式程序不依赖 Node.js：
+
+```powershell
 node .\tests\integration.mjs
 ```
 
-第一步构建程序并执行 C++ 本地测试；第二步需要 Node.js，仅用于运行模拟供应商集成测试，正式程序不依赖 Node.js。集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
+集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
 
 只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-presets.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-presets.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-presets.exe`。
 
