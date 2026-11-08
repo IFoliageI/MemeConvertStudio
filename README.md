@@ -7,6 +7,8 @@ Windows 原生 C++20 桌面程序，通过可自定义供应商的 OpenAI 兼容
 双击 `bin\MemeStudio.exe`。支持 Windows 10/11 x64；使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外的运行时安装。
 
 `MemeStudio-Windows-x64.zip` 包含可执行文件、全部 C++ 源码、测试和说明。重新打包可运行 `.\package.ps1`。
+`MemeStudio-Plugins.zip` 单独包含插件 DLL、清单及说明，解压到新版 EXE 所在目录。
+局部重绘与超分的宿主服务需要本次新版程序，旧版仅替换 DLL 无法提供完整功能。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -34,6 +36,17 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 参数底部“插件管理”支持扫描、启停插件及执行插件命令。插件可修改提示词、
 处理最终帧像素、追加或替换附加要求。附带默认关闭的示例插件和版本化 C ABI SDK。
 安装、开发和缓存规则详见 [PLUGINS.md](PLUGINS.md)。
+
+新增两个默认关闭的插件：
+
+- **局部重绘**：启用后从顶部“局部重绘…”进入，默认读取当前选中的成品，
+  可框选矩形、输入修正要求、添加本轮新画风参考并另存；支持静态图和完整 GIF。
+  PNG 的选区外像素由本地合成保留。GIF 仍会重新量化颜色。
+- **Waifu2x 输入/输出超分**：选择外部 `waifu2x-ncnn-vulkan.exe` 与模型目录，
+  独立开启输入或输出超分，设置倍率、降噪、分块、GPU、TTA 和超时。
+  不内置或安装第三方程序。输出超分放大实际成品，且可复用已有 API 帧缓存。
+
+局部重绘、超分的配置及命令行示例见 [PLUGINS.md](PLUGINS.md)。
 
 ## 供应商兼容
 
@@ -138,13 +151,19 @@ node .\tests\integration.mjs
 
 第一步构建程序并执行 C++ 本地测试；第二步需要 Node.js，仅用于运行模拟供应商集成测试，正式程序不依赖 Node.js。集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
 
-只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-batch.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-batch.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-batch.exe`。
+只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-plugins.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-plugins.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-plugins.exe`。
 
 流式与参数定向检查为 `node tests/streaming.mjs`，可通过 `--exe=D:\Projects\MemeStudio\bin\MemeStudio-next.exe` 指定构建产物；不调用真实供应商。
 
 批量与插件定向检查：`node tests/batch.mjs`。加 `--ui-only` 仅检查拖入文件、
 张数控件与插件管理命令，并生成界面截图。可通过 `--exe=绝对路径` 指定程序；
 使用现有 `tmp/tests` 示例素材，不调用真实供应商。
+
+局部重绘与外部工具接口定向检查：
+先运行 `.\tests\build-waifu-mock.ps1`，再运行 `node tests/refine-upscale.mjs`。
+仅构建并调用模拟工具，不下载 Waifu2x。运行
+`node tests/batch.mjs --exe=D:\Projects\MemeStudio\bin\MemeStudio-plugins.exe --ui-only`
+可检查两个插件窗口，并在 `tmp/tests` 生成 `ui-refine.png` 等截图。
 
 也提供 CMake 工程：
 

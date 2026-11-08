@@ -93,6 +93,11 @@ Image edit(const Provider& provider, const std::string& prompt,
            const std::function<void(const Image&, int)>& preview = {});
 
 class Plugins;
+struct UpscaleOptions {
+    fs::path executable, models;
+    bool input = false, output = false, tta = false;
+    int scale = 2, noise = 0, tile = 0, gpu = -2, timeout = 600;
+};
 struct Job {
     Provider provider;
     fs::path source, character, output;
@@ -106,6 +111,9 @@ struct Job {
     bool consistency = true;
     bool preserveText = true;
     bool resume = true;
+    bool refine = false;
+    Crop region;
+    UpscaleOptions upscale;
 };
 struct Progress {
     int done = 0, total = 0;
@@ -119,6 +127,11 @@ std::string prompt(const Job& job, int index, int total, size_t styleCount, bool
                    const std::vector<int>& neighbors = {});
 void runJob(const Job& job, Cancel& cancel, const Reporter& report);
 std::vector<fs::path> outputPaths(const Job& job);
+Image preserveOutside(const Image& original, const Image& edited, const Crop& region);
+bool editRefinement(HINSTANCE instance, HWND owner, Job& job, bool capture = false);
+Json upscaleJson(const UpscaleOptions& options);
+UpscaleOptions upscaleOptions(const Json& value);
+bool editUpscale(HINSTANCE instance, HWND owner, UpscaleOptions& options, bool capture = false);
 int runGui(HINSTANCE instance, const fs::path& demo = {}, bool capture = false);
 int selfTest(const fs::path& directory);
 int networkTest(const fs::path& directory, const std::wstring& base);

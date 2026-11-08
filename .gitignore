@@ -6,5 +6,6 @@
 /.vs/
 /MemeStudio-error.txt
 /MemeStudio-Windows-x64.zip
+/MemeStudio-Plugins.zip
 *.part
 *.memestudio/

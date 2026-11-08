@@ -36,7 +36,9 @@ int wmain(int argc, wchar_t** argv) {
             Json config = readJson(argv[2]);
             Job job;
             job.source = wide(config.at("source").get<std::string>());
-            job.character = wide(config.at("character").get<std::string>());
+            job.refine = config.value("mode", "replace") == "refine";
+            if (config.contains("upscale")) job.upscale = upscaleOptions(config["upscale"]);
+            job.character = wide(config.value("character", ""));
             job.output = wide(config.at("output").get<std::string>());
             job.provider.baseUrl = wide(config.value("base_url", "https://api.openai.com/v1"));
             job.provider.model = config.value("model", "gpt-image-1");
@@ -54,7 +56,11 @@ int wmain(int argc, wchar_t** argv) {
             wchar_t key[8192]{}; DWORD count = GetEnvironmentVariableW(environmentName.c_str(), key, 8192);
             if (count && count < 8192) job.provider.key = key;
             SecureZeroMemory(key, sizeof(key));
-            job.stride = config.value("stride", 1); job.maxFrames = config.value("max_frames", 24);
+            job.stride = config.value("stride", 1); job.maxFrames = config.value("max_frames", job.refine ? 0 : 24);
+            if (config.contains("region")) {
+                const auto& region = config["region"];
+                job.region = {region.at("x"), region.at("y"), region.at("width"), region.at("height")};
+            }
             job.generationCount = config.value("count", 1);
             if (config.contains("plugins"))
                 job.plugins = std::make_shared<Plugins>(

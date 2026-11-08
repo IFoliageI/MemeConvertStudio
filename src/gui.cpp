@@ -12,6 +12,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <optional>
 
 namespace studio {
 namespace {
@@ -25,7 +26,7 @@ enum Id {
     Consistency, PreserveText, Resume, Remember, Instruction, Output, BrowseOutput,
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
-    GenerationCount, CountSpin, PluginManage, ResultChoice
+    GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry
 };
 struct State;
 struct View {
@@ -60,6 +61,7 @@ struct State {
     std::vector<PluginInfo> availablePlugins;
     std::vector<std::string> enabledPlugins;
     std::shared_ptr<Plugins> plugins;
+    UpscaleOptions upscale;
     Crop crop;
     View views[3];
     int frame = 0, elapsed = 0, scroll = 0;
@@ -504,6 +506,7 @@ static void saveSettings(State& state) {
     for (int id : {Consistency, PreserveText, Resume, Remember, Streaming}) data[std::to_string(id)] = state.checked(id);
     if (state.checked(Remember)) data["encrypted_key"] = protect(state.text(state.get(Key)));
     data["enabled_plugins"] = state.enabledPlugins;
+    data["upscale"] = upscaleJson(state.upscale);
     writeJson(settingsPath(), data);
 }
 static void loadSettings(State& state) {
@@ -526,6 +529,7 @@ static void loadSettings(State& state) {
         if (state.checked(Remember) && data.contains("encrypted_key"))
             state.set(state.get(Key), unprotect(data["encrypted_key"].get<std::string>()));
         state.enabledPlugins = data.value("enabled_plugins", std::vector<std::string>{});
+        if (data.contains("upscale")) state.upscale = upscaleOptions(data["upscale"]);
     } catch (const std::exception& error) {
         state.logLine(L"读取设置失败：" + wide(error.what()));
     }
@@ -576,9 +580,15 @@ static void dropFiles(State& state, HDROP drop, int kind) {
         state.set(state.status, L"拖入失败"); state.logLine(wide(error.what()));
     }
 }
+static void start(State& state, const Job* refinement = nullptr);
+static void updateRefineEntry(State& state) {
+    EnableWindow(GetDlgItem(state.window, RefineEntry), !state.busy &&
+        std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.local-redraw") != state.enabledPlugins.end());
+}
 static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
     state.plugins.reset();
     state.enabledPlugins.clear();
+    updateRefineEntry(state);
     auto logger = [window = state.window](const std::wstring& message) {
         auto event = std::make_unique<Progress>();
         event->message = L"插件：" + message;
@@ -587,6 +597,7 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
     };
     state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger);
     state.enabledPlugins = enabled;
+    updateRefineEntry(state);
 }
 enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, PluginFolder, PluginApply };
 struct PluginDialog {
@@ -594,6 +605,7 @@ struct PluginDialog {
     HWND list{}, commands{};
     bool capture = false;
     std::string failure;
+    std::optional<Job> refinement;
 };
 static void fillPluginCommands(PluginDialog& dialog) {
     SendMessageW(dialog.commands, CB_RESETCONTENT, 0, 0);
@@ -709,8 +721,23 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             auto info = state.availablePlugins[selected];
             applyPlugins(state, selectedPlugins(*dialog)); saveSettings(state);
             Json context{{"source", utf8(state.source.wstring())}, {"character", utf8(state.character.wstring())},
+                {"result", utf8(state.resultPath.wstring())},
                 {"output", utf8(state.text(state.output))}, {"instruction", utf8(state.text(state.instruction))}};
             auto result = state.plugins->command(info.id, info.commands.at(commandIndex).id, context, window);
+            if (result.value("action", "") == "refine") {
+                Job job; job.source = state.resultPath;
+                if (editRefinement(state.instance, window, job, false)) {
+                    dialog->refinement = std::move(job);
+                    EndDialog(window, IDOK);
+                }
+                return TRUE;
+            }
+            if (result.value("action", "") == "configure_upscale") {
+                if (editUpscale(state.instance, window, state.upscale)) {
+                    saveSettings(state); state.logLine(L"Waifu2x 输入/输出超分设置已保存");
+                }
+                return TRUE;
+            }
             if (result.contains("instruction"))
                 state.set(state.instruction, wide(result.at("instruction").get<std::string>()));
             if (result.contains("append_instruction")) {
@@ -741,6 +768,7 @@ static void managePlugins(State& state, bool capture = false) {
         reinterpret_cast<LPARAM>(&dialog));
     if (result == -1) throw Error("无法打开插件管理窗口");
     if (!dialog.failure.empty()) throw Error(dialog.failure);
+    if (dialog.refinement) start(state, &*dialog.refinement);
 }
 static void selectResult(State& state, size_t index) {
     auto path = state.resultPaths.at(index);
@@ -773,9 +801,10 @@ static void fetchModels(State& state) {
             completion.release();
     });
 }
-static void start(State& state) {
+static void start(State& state, const Job* refinement) {
     if (state.busy) return;
-    if (state.source.empty() || state.character.empty()) throw Error("请先导入表情素材和人物参考图");
+    if (!refinement && (state.source.empty() || state.character.empty()))
+        throw Error("请先导入表情素材和人物参考图");
     Job job;
     job.source = state.source; job.character = state.character; job.styles = state.stylePaths;
     job.crop = state.crop; job.instruction = state.text(state.instruction);
@@ -785,6 +814,14 @@ static void start(State& state) {
     job.resume = state.checked(Resume);
     job.generationCount = state.number(GenerationCount, 1, 10);
     job.plugins = state.plugins;
+    if (std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.waifu2x") != state.enabledPlugins.end())
+        job.upscale = state.upscale;
+    if (refinement) {
+        job.refine = true; job.region = refinement->region;
+        job.source = refinement->source; job.character.clear(); job.crop = {};
+        job.styles = refinement->styles; job.instruction = refinement->instruction;
+        job.output = refinement->output; job.stride = 1; job.maxFrames = 0;
+    }
     job.provider.baseUrl = state.text(state.get(BaseUrl)); job.provider.key = state.text(state.get(Key));
     job.provider.model = utf8(state.text(state.get(Model))); job.provider.quality = utf8(state.text(state.get(Quality)));
     auto modelBegin = job.provider.model.find_first_not_of(" \t\r\n");
@@ -826,7 +863,7 @@ static void start(State& state) {
     EnableWindow(GetDlgItem(state.window, CancelJob), TRUE);
     state.set(state.status, L"正在准备任务…");
     state.previewImage.reset(); state.showingResult = true;
-    state.logLine(L"任务开始，模型：" + wide(job.provider.model));
+    state.logLine((job.refine ? L"局部重绘开始，模型：" : L"任务开始，模型：") + wide(job.provider.model));
     SendMessageW(state.progress, PBM_SETPOS, 0, 0);
     if (state.worker.joinable()) state.worker.join();
     state.worker = std::thread([&state, job] {
@@ -916,6 +953,7 @@ static void initialize(State& state) {
         WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
         Instruction, 16, 686, 242, 100, true);
     button(SourceTab, L"原图", 0, 0, 82, false); button(ResultTab, L"结果", 0, 0, 82, false);
+    button(RefineEntry, L"局部重绘…", 380, 15, 120);
     state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
         WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
     ShowWindow(state.resultChoice, SW_HIDE);
@@ -971,6 +1009,16 @@ static void initialize(State& state) {
 static void command(State& state, int id, int notification) {
     if ((id == Stride || id == MaxFrames || id == GenerationCount) && notification == EN_CHANGE) { state.updateEstimate(); return; }
     if (id == PluginManage) { managePlugins(state); return; }
+    if (id == RefineEntry && !state.busy) {
+        if (!state.plugins) throw Error("请先启用局部重绘插件");
+        auto result = state.plugins->command("memestudio.local-redraw", "refine-result",
+            {{"result", utf8(state.resultPath.wstring())}}, state.window);
+        if (result.value("action", "") == "refine") {
+            Job job; job.source = state.resultPath;
+            if (editRefinement(state.instance, state.window, job)) start(state, &job);
+        }
+        return;
+    }
     if (id == ResultChoice && notification == CBN_SELCHANGE) {
         auto selected = SendMessageW(state.resultChoice, CB_GETCURSEL, 0, 0);
         if (selected != CB_ERR && !state.busy) selectResult(state, size_t(selected));
@@ -1072,6 +1120,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             state->busy = false;
             for (auto control : state->lockControls) EnableWindow(control, TRUE);
             updateProviderControls(*state);
+            updateRefineEntry(*state);
             EnableWindow(GetDlgItem(window, CancelJob), FALSE);
             if (completion->modelFetch) {
                 state->fetchingModels = false;
@@ -1241,6 +1290,26 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         applyPlugins(state, {});
         state.set(state.instruction, savedInstruction);
         report["plugin_hooks"] = "passed";
+        applyPlugins(state, {"memestudio.local-redraw"});
+        auto refineAction = state.plugins->command("memestudio.local-redraw", "refine-result",
+            Json::object(), window);
+        if (refineAction.value("action", "") != "refine") throw Error("Redraw plugin action failed");
+        Job refinement; refinement.source = demo / L"source.gif";
+        if (!editRefinement(instance, window, refinement, true) || !refinement.refine ||
+            refinement.styles.size() != 1 || refinement.instruction.empty() ||
+            refinement.region.width >= .6 || refinement.output == refinement.source)
+            throw Error("Redraw dialog configuration failed");
+        applyPlugins(state, {});
+        report["refinement_plugin"] = "passed";
+        applyPlugins(state, {"memestudio.waifu2x"});
+        auto upscaleAction = state.plugins->command("memestudio.waifu2x", "configure-upscale",
+            Json::object(), window);
+        if (upscaleAction.value("action", "") != "configure_upscale") throw Error("Upscale plugin action failed");
+        UpscaleOptions upscale;
+        if (!editUpscale(instance, window, upscale, true) || upscale.input || upscale.output || upscale.scale != 4)
+            throw Error("Upscale dialog configuration failed");
+        applyPlugins(state, {});
+        report["upscale_plugin"] = "passed";
         // Repaint after imports so crop coordinates refer to the current reference image.
         snapshot(1120, 830, L"ui-compact.png");
         // Exercise the window's own crop handler using its rendered image bounds.

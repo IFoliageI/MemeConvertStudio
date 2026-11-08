@@ -90,10 +90,12 @@ Plugins::Plugins(const std::vector<PluginInfo>& available, const std::vector<std
     } } catch (...) { modules.clear(); throw; }
 }
 Plugins::~Plugins() { modules.clear(); }
-Json Plugins::fingerprint() const {
+Json Plugins::fingerprint(bool frameOnly) const {
     Json result = Json::array();
-    for (const auto& module : modules)
+    for (const auto& module : modules) {
+        if (frameOnly && !module->api->transform_prompt && !module->api->process_frame) continue;
         result.push_back({{"id", module->info.id}, {"version", module->info.version}, {"sha256", module->hash}});
+    }
     return result;
 }
 std::string Plugins::transform(const Json& context, std::string prompt) const {

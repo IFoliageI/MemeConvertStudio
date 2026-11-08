@@ -23,7 +23,7 @@ public:
     ~Plugins();
     Plugins(const Plugins&) = delete;
     Plugins& operator=(const Plugins&) = delete;
-    Json fingerprint() const;
+    Json fingerprint(bool frameOnly = false) const;
     std::string transform(const Json& context, std::string prompt) const;
     void process(const Json& context, Image& image) const;
     Json command(const std::string& plugin, const std::string& command, const Json& context, HWND owner) const;
