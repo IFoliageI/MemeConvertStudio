@@ -1,5 +1,6 @@
 #include "studio.hpp"
 #include "plugins.hpp"
+#include "presets.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -26,7 +27,7 @@ enum Id {
     Consistency, PreserveText, Resume, Remember, Instruction, Output, BrowseOutput,
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
-    GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry
+    GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets
 };
 struct State;
 struct View {
@@ -157,6 +158,127 @@ static HWND control(State& state, HWND parent, const wchar_t* type, const std::w
         SetWindowSubclass(result, settingsWheel, 1, reinterpret_cast<DWORD_PTR>(parent));
     if (lock) state.lockControls.push_back(result);
     return result;
+}
+enum PresetId { PresetCategory = 2200, PresetList, PresetPreview, PresetReplace };
+struct PresetDialog {
+    State* state;
+    HWND category{}, list{}, preview{};
+    int captureCommand = 0;
+    std::function<void(HWND)> capture;
+    std::wstring value;
+    std::string failure;
+};
+static void previewPreset(PresetDialog& dialog) {
+    auto selected = SendMessageW(dialog.list, LB_GETCURSEL, 0, 0);
+    if (selected == LB_ERR) return;
+    auto index = SendMessageW(dialog.list, LB_GETITEMDATA, selected, 0);
+    dialog.state->set(dialog.preview, instructionPresets[index].instruction);
+}
+static void fillPresets(PresetDialog& dialog) {
+    auto category = dialog.state->text(dialog.category);
+    SendMessageW(dialog.list, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < std::size(instructionPresets); ++i) {
+        const auto& preset = instructionPresets[i];
+        if (category != L"全部" && category != preset.category) continue;
+        auto label = category == L"全部" ? std::wstring(preset.category) + L" · " + preset.title : preset.title;
+        auto row = SendMessageW(dialog.list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        SendMessageW(dialog.list, LB_SETITEMDATA, row, i);
+    }
+    SendMessageW(dialog.list, LB_SETCURSEL, 0, 0);
+    previewPreset(dialog);
+}
+static INT_PTR CALLBACK presetProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* dialog = reinterpret_cast<PresetDialog*>(GetWindowLongPtrW(window, DWLP_USER));
+    try {
+        if (message == WM_INITDIALOG) {
+            dialog = reinterpret_cast<PresetDialog*>(lparam);
+            SetWindowLongPtrW(window, DWLP_USER, reinterpret_cast<LONG_PTR>(dialog));
+            auto& state = *dialog->state;
+            SetWindowTextW(window, L"附加要求预设");
+            RECT rect{0, 0, 760, 428}, owner{};
+            AdjustWindowRectEx(&rect, GetWindowLongW(window, GWL_STYLE), FALSE,
+                GetWindowLongW(window, GWL_EXSTYLE));
+            GetWindowRect(state.window, &owner);
+            int width = rect.right - rect.left, height = rect.bottom - rect.top;
+            SetWindowPos(window, nullptr, owner.left + (owner.right - owner.left - width) / 2,
+                owner.top + (owner.bottom - owner.top - height) / 2, width, height, SWP_NOZORDER);
+            auto add = [&](const wchar_t* type, const wchar_t* label, DWORD style, int id,
+                int x, int y, int w, int h) {
+                return control(state, window, type, label, style, id, x, y, w, h);
+            };
+            add(L"STATIC", L"分类", SS_LEFT, 0, 16, 18, 40, 22);
+            dialog->category = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                PresetCategory, 64, 14, 208, 240);
+            SendMessageW(dialog->category, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"全部"));
+            for (const auto& preset : instructionPresets)
+                if (SendMessageW(dialog->category, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
+                    reinterpret_cast<LPARAM>(preset.category)) == CB_ERR)
+                    SendMessageW(dialog->category, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(preset.category));
+            SendMessageW(dialog->category, CB_SETCURSEL, 0, 0);
+            dialog->list = add(L"LISTBOX", L"", WS_TABSTOP | WS_BORDER | WS_VSCROLL |
+                LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, PresetList, 16, 54, 256, 300);
+            add(L"STATIC", L"要求内容", SS_LEFT, 0, 292, 18, 200, 22);
+            dialog->preview = add(L"EDIT", L"", WS_TABSTOP | ES_MULTILINE | ES_READONLY |
+                ES_AUTOVSCROLL | WS_VSCROLL, PresetPreview, 292, 54, 452, 300);
+            add(L"BUTTON", L"追加", WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, 432, 380, 96, 32);
+            add(L"BUTTON", L"替换全部", WS_TABSTOP | BS_PUSHBUTTON, PresetReplace, 540, 380, 96, 32);
+            add(L"BUTTON", L"取消", WS_TABSTOP | BS_PUSHBUTTON, IDCANCEL, 648, 380, 96, 32);
+            fillPresets(*dialog);
+            if (dialog->captureCommand) PostMessageW(window, WM_APP + 9, 0, 0);
+            return TRUE;
+        }
+        if (!dialog) return FALSE;
+        if (message == WM_APP + 9 && dialog->captureCommand) {
+            // Exercise filtering and selection through the same notifications as user input.
+            SendMessageW(dialog->category, CB_SETCURSEL, 5, 0);
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(PresetCategory, CBN_SELCHANGE), 0);
+            if (SendMessageW(dialog->list, LB_GETCOUNT, 0, 0) != 3 ||
+                dialog->state->text(dialog->preview).find(L"GIF") == std::wstring::npos)
+                throw Error("Preset category or preview failed");
+            SendMessageW(dialog->list, LB_SETCURSEL, 1, 0);
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(PresetList, LBN_SELCHANGE), 0);
+            if (dialog->capture) dialog->capture(window);
+            SendMessageW(window, WM_COMMAND, dialog->captureCommand, 0);
+            return TRUE;
+        }
+        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message != WM_COMMAND) return FALSE;
+        int id = LOWORD(wparam);
+        if (id == PresetCategory && HIWORD(wparam) == CBN_SELCHANGE) fillPresets(*dialog);
+        else if (id == PresetList && HIWORD(wparam) == LBN_SELCHANGE) previewPreset(*dialog);
+        else if (id == IDCANCEL) EndDialog(window, IDCANCEL);
+        else if (id == IDOK || id == PresetReplace) {
+            dialog->value = dialog->state->text(dialog->preview);
+            if (!dialog->value.empty()) EndDialog(window, id);
+        }
+    } catch (const std::exception& error) {
+        if (dialog && dialog->captureCommand) {
+            dialog->failure = error.what(); EndDialog(window, IDABORT);
+        } else MessageBoxW(window, wide(error.what()).c_str(), L"附加要求预设", MB_OK | MB_ICONERROR);
+    }
+    return FALSE;
+}
+static void choosePreset(State& state, int captureCommand = 0, std::function<void(HWND)> capture = {}) {
+    if (state.busy) return;
+    PresetDialog dialog{&state};
+    dialog.captureCommand = captureCommand; dialog.capture = std::move(capture);
+    struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
+    resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | WS_CLIPCHILDREN;
+    resource.dialog.cx = 470; resource.dialog.cy = 260;
+    auto result = DialogBoxIndirectParamW(state.instance, &resource.dialog, state.window, presetProcedure,
+        reinterpret_cast<LPARAM>(&dialog));
+    if (result == -1) throw Error("无法打开预设窗口");
+    if (!dialog.failure.empty()) throw Error(dialog.failure);
+    if (result != IDOK && result != PresetReplace) return;
+    auto current = state.text(state.instruction);
+    auto value = dialog.value;
+    if (result == IDOK) {
+        if (!current.empty() && current.back() != L'\n') value = L"\r\n" + value;
+        SendMessageW(state.instruction, EM_SETSEL, current.size(), current.size());
+    } else SendMessageW(state.instruction, EM_SETSEL, 0, -1);
+    SendMessageW(state.instruction, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(value.c_str()));
+    SetFocus(state.instruction);
+    SendMessageW(state.instruction, EM_SCROLLCARET, 0, 0);
 }
 static std::vector<fs::path> chooseImages(HWND owner, bool multi) {
     ComPtr<IFileOpenDialog> dialog;
@@ -948,7 +1070,7 @@ static void initialize(State& state) {
     state.styles = control(state, state.window, L"LISTBOX", L"",
         WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_BORDER,
         StyleList, 16, 582, 242, 65, true);
-    label(L"附加要求", 16, 658, 200);
+    label(L"附加要求", 16, 658, 150); button(InstructionPresets, L"预设…", 176, 652, 82);
     state.instruction = control(state, state.window, L"EDIT", L"",
         WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
         Instruction, 16, 686, 242, 100, true);
@@ -1007,6 +1129,7 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == InstructionPresets) { choosePreset(state); return; }
     if ((id == Stride || id == MaxFrames || id == GenerationCount) && notification == EN_CHANGE) { state.updateEstimate(); return; }
     if (id == PluginManage) { managePlugins(state); return; }
     if (id == RefineEntry && !state.busy) {
@@ -1222,29 +1345,52 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         Json report{{"quality", utf8(state.text(state.get(Quality)))},
             {"image_field", utf8(state.text(state.get(ImageField)))},
             {"character_crop", "ready"}, {"snapshots", Json::array()}};
-        auto snapshot = [&](int width, int height, const wchar_t* filename) {
-            SetWindowPos(window, nullptr, 0, 0, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-            layout(state);
+        auto snapshot = [&](int width, int height, const wchar_t* filename, HWND target = nullptr) {
+            if (!target) {
+                target = window;
+                SetWindowPos(window, nullptr, 0, 0, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+                layout(state);
+            }
             Image image{static_cast<UINT>(width), static_cast<UINT>(height),
                 Bytes(size_t(width) * height * 4)};
             BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
             info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
             info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
-            HDC dc = GetDC(window), memory = CreateCompatibleDC(dc);
+            HDC dc = GetDC(target), memory = CreateCompatibleDC(dc);
             void* pixels = nullptr;
             HBITMAP dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
             if (!dib) throw Error("Cannot capture UI bitmap");
             auto old = SelectObject(memory, dib);
-            SendMessageW(window, WM_PRINT, reinterpret_cast<WPARAM>(memory),
+            SendMessageW(target, WM_PRINT, reinterpret_cast<WPARAM>(memory),
                 PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND | PRF_NONCLIENT);
             memcpy(image.pixels.data(), pixels, image.pixels.size());
             for (size_t p = 3; p < image.pixels.size(); p += 4) image.pixels[p] = 255;
-            SelectObject(memory, old); DeleteObject(dib); DeleteDC(memory); ReleaseDC(window, dc);
+            SelectObject(memory, old); DeleteObject(dib); DeleteDC(memory); ReleaseDC(target, dc);
             savePng(demo / filename, image);
             report["snapshots"].push_back({{"width", width}, {"height", height}, {"file", utf8(filename)}});
         };
         snapshot(1280, 900, L"ui-wide.png");
         snapshot(1120, 830, L"ui-compact.png");
+        auto originalInstruction = state.text(state.instruction);
+        choosePreset(state, IDOK, [&](HWND dialog) {
+            RECT bounds{}; GetWindowRect(dialog, &bounds);
+            snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top, L"ui-presets.png", dialog);
+        });
+        auto appended = state.text(state.instruction);
+        if (appended.find(originalInstruction + L"\r\n") != 0 || appended.find(L"颜色漂移") == std::wstring::npos)
+            throw Error("Preset append did not preserve existing requirements");
+        choosePreset(state, IDCANCEL);
+        if (state.text(state.instruction) != appended) throw Error("Preset cancel changed requirements");
+        choosePreset(state, PresetReplace);
+        if (state.text(state.instruction).find(originalInstruction) != std::wstring::npos ||
+            state.text(state.instruction).find(L"颜色漂移") == std::wstring::npos)
+            throw Error("Preset replace failed");
+        state.set(state.instruction, L"");
+        choosePreset(state, IDOK);
+        if (state.text(state.instruction).find(L"若输入为 GIF") != 0)
+            throw Error("Preset append to empty requirements failed");
+        state.set(state.instruction, originalInstruction);
+        report["instruction_presets"] = "passed";
         auto drop = [&](HWND target, const fs::path& path) {
             auto name = path.wstring();
             HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT,
