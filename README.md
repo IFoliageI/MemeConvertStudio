@@ -12,13 +12,13 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
 
-插件 SDK、插件源码和开发说明包含在 `main` 分支；每个插件另有独立发行分支，分支内的 `plugin-release/plugins/` 只包含对应插件：
+完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有三个精简插件分支；它们不包含应用宿主源码或其他插件：
 
-- `plugin-example`：示例提示词插件。
-- `plugin-local-redraw`：局部重绘插件。
-- `plugin-waifu2x`：Waifu2x 输入/输出超分插件。
+- [`plugin-example`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-example)：示例提示词插件。
+- [`plugin-local-redraw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-local-redraw)：局部重绘命令插件。
+- [`plugin-waifu2x`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-waifu2x)：Waifu2x 输入/输出超分命令插件。
 
-独立分支同时附有插件清单、Windows x64 DLL 和 SDK 文档。局部重绘与超分需要新版宿主程序，单独替换 DLL 不能为旧版增加宿主功能。
+每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1` 和专属 README。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘与超分插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -70,10 +70,6 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
   不内置或安装第三方程序。输出超分放大实际成品，且可复用已有 API 帧缓存。
 
 局部重绘、超分的配置及命令行示例见 [PLUGINS.md](PLUGINS.md)。
-
-### 插件分支
-
-GitHub 为每个插件提供一个独立发行分支。各分支中的 `plugin-release/plugins/<插件目录>/` 包含该插件的 DLL 和 `plugin.json`；`plugin-release/PLUGINS.md` 说明安装与 C ABI。应用完整源码和构建入口仍以 `main` 分支为准；第三方插件应遵守 SDK 的版本和 ABI 约定。
 
 ## 供应商兼容
 
