@@ -136,11 +136,6 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 - https://developers.openai.com/api/reference/resources/images/methods/edit
 - https://developers.openai.com/api/reference/resources/images/edit-streaming-events
 
-## 触控板操作
-
-设置面板保留小于一个标准滚轮刻度的滚动量，支持精准触控板的小幅连续双指滚动。光标位于关闭的下拉框或单行输入框上时，滚动面板而不意外更改参数；展开的下拉列表和多行编辑框保留自身的滚动行为。
-
-预览支持高分辨率横向/纵向滚动平移；捏合产生的 Ctrl+滚动消息或原生缩放手势用于以指针位置为中心缩放（1–8 倍）。原生平移手势亦可处理；双击恢复适应窗口，人物框选坐标随缩放后的图像计算。实际手势是否被系统发送给应用取决于触控板驱动及 Windows 设置。
 
 ## GIF 行为与调用量
 
@@ -306,14 +301,11 @@ Start-Process .\bin\MemeStudio.exe -ArgumentList @("--job", "D:\path\job.json") 
 
 可用 `MemeStudio.exe --inspect <图片路径> <报告.json>` 导出尺寸、帧时长和循环信息。`loop: 65536` 表示没有循环扩展，`0` 表示无限循环，`1..65535` 是 GIF 扩展中的重复次数。
 
-## 本地版本管理
-
-项目默认分支为 `main`，远程仓库为 `IFoliageI/MemeConvertStudio`；各插件拥有独立源码分支，入口见本文开头。`bin`、`build`、`dist`、`tmp`、发布 ZIP 与生成帧缓存不纳入版本管理；用户密钥仍保存在项目外的系统设置目录。
 
 ## 限制
 
-只实现 Windows 桌面版。为控制内存，单图不超过 3200 万像素，任一边不超过 16384 像素，GIF 不超过 600 帧且解码像素合计不超过 384 MB。上传前将每张参考与源帧限制到最长边 2048 像素。
+为控制内存，单图不超过 3200 万像素，任一边不超过 16384 像素，GIF 不超过 600 帧且解码像素合计不超过 384 MB。上传前将每张参考与源帧限制到最长边 2048 像素。
 
 本项目的自动测试使用本机模拟接口，不验证特定供应商的可用性、模型权限、收费规则或实际生成质量。实际效果取决于供应商及所用模型。
 
-第三方依赖只有 nlohmann/json，MIT 许可见 `vendor/nlohmann/LICENSE.MIT`。
+第三方依赖: nlohmann/json，MIT 许可见 `vendor/nlohmann/LICENSE.MIT`。
