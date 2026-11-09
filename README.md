@@ -31,3 +31,12 @@ Copy the `plugins` directory from `dist` beside a compatible MemeConvertStudio e
 The DLL registers the `configure-upscale` command and asks the host to open its Waifu2x configuration workflow. Process discovery, command-line invocation, temporary files, image conversion, and input/output scaling are host services, not implemented inside this command plugin. Install `waifu2x-ncnn-vulkan` separately; this branch does not redistribute that third-party executable or model files. Use a MemeConvertStudio host build that includes the Waifu2x service. The full host implementation is on the `main` branch.
 
 The ABI callback lifetime and ownership contract are documented in `include/memestudio_plugin.h`.
+
+## GitHub Actions
+
+Pushes to this plugin branch and pull requests targeting it run `Build Plugin`.
+You can also select this branch under Actions > Build Plugin > Run workflow.
+The workflow builds only this plugin, without running tests or calling image APIs.
+Download `MemeStudio-Plugin-Windows-x64` from the completed run's Artifacts section
+and place the extracted `plugins` directory beside a compatible host executable.
+Artifacts are retained for 14 days.
