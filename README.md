@@ -194,6 +194,23 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 
 ## 构建与测试
 
+### GitHub Actions 自动编译
+
+`main` 分支推送、面向 `main` 的 PR 会自动运行 `Build Windows`；
+也可在仓库 Actions 页面选择该工作流并点击 `Run workflow`。
+使用 Windows x64 环境，直接执行 `build.ps1` 和 `package.ps1`，只编译打包，
+不运行完整测试、不调用图像供应商，也不需要配置 API Key。
+
+成功后在运行详情页的 Artifacts 下载 `MemeConvertStudio-Windows-x64`，
+其中包含完整应用包 `MemeStudio-Windows-x64.zip` 和插件包 `MemeStudio-Plugins.zip`。
+构建产物保存 14 天。同一分支新提交会取消旧构建。
+
+四个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
+只构建该分支对应插件。下载其 `MemeStudio-Plugin-Windows-x64`，
+将解压后的 `plugins` 目录放到兼容的主程序旁。工作流不创建 GitHub Release。
+
+### 本地构建
+
 需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。
 
 ```powershell
