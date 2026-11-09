@@ -1,7 +1,9 @@
 #include "studio.hpp"
 #include "plugins.hpp"
+#include "batch.hpp"
 #include <shellapi.h>
 #include <iostream>
+#include <algorithm>
 
 int wmain(int argc, wchar_t** argv) {
     using namespace studio;
@@ -35,7 +37,7 @@ int wmain(int argc, wchar_t** argv) {
         } else if (argc >= 3 && std::wstring(argv[1]) == L"--job") {
             Json config = readJson(argv[2]);
             Job job;
-            job.source = wide(config.at("source").get<std::string>());
+            job.source = wide(config.value("source", ""));
             job.refine = config.value("mode", "replace") == "refine";
             if (config.contains("upscale")) job.upscale = upscaleOptions(config["upscale"]);
             job.character = wide(config.value("character", ""));
@@ -76,7 +78,7 @@ int wmain(int argc, wchar_t** argv) {
                 job.crop = {crop.at("x"), crop.at("y"), crop.at("width"), crop.at("height")};
             }
             Cancel cancel;
-            runJob(job, cancel, [&](const Progress& progress) {
+            auto reporter = [&](const Progress& progress) {
                 if (progress.preview && config.contains("preview_file"))
                     savePng(wide(config["preview_file"].get<std::string>()), *progress.preview);
                 if (config.contains("progress_file"))
@@ -84,7 +86,19 @@ int wmain(int argc, wchar_t** argv) {
                         {{"done", progress.done}, {"total", progress.total}, {"message", utf8(progress.message)},
                          {"frame", progress.frame}, {"partial_image_index", progress.partial},
                          {"copy_index", progress.copy}, {"count", progress.copies}});
-            });
+            };
+            if (config.contains("sources")) {
+                if (job.refine) throw Error("批量转换不支持局部重绘模式");
+                const auto enabled = config.value("plugins", std::vector<std::string>{});
+                if (std::find(enabled.begin(), enabled.end(), "memestudio.batch-convert") == enabled.end())
+                    throw Error("请先启用批量转换插件");
+                std::vector<fs::path> inputs;
+                for (const auto& path : config.at("sources")) inputs.emplace_back(wide(path.get<std::string>()));
+                auto sources = collectSources(inputs);
+                auto jobs = sourceJobs(sources, job, job.output);
+                std::vector<fs::path> completed;
+                runSourceJobs(sources, jobs, cancel, reporter, completed);
+            } else runJob(job, cancel, reporter);
         } else {
             exitCode = runGui(GetModuleHandleW(nullptr), argc >= 3 && std::wstring(argv[1]) == L"--demo" ? argv[2] : fs::path{});
         }

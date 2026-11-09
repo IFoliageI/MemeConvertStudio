@@ -12,13 +12,14 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
 
-完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有三个精简插件分支；它们不包含应用宿主源码或其他插件：
+完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有四个精简插件分支；它们不包含应用宿主源码或其他插件：
 
 - [`plugin-example`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-example)：示例提示词插件。
 - [`plugin-local-redraw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-local-redraw)：局部重绘命令插件。
 - [`plugin-waifu2x`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-waifu2x)：Waifu2x 输入/输出超分命令插件。
+- [`plugin-batch-convert`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-batch-convert)：多源图片和 GIF 批量转换插件。
 
-每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1` 和专属 README。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘与超分插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
+每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1` 和专属 README。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分与批量转换插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -47,6 +48,34 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 ## 批量生成与插件
 
+### 多源素材批量转换
+
+在“插件管理”中勾选“批量转换”并应用。启用后，“原始表情”的“导入…”支持一次多选，
+“目录”可选择素材文件夹；也可把多个图片、GIF、文件夹一起拖入源素材预览区域。
+每次导入替换当前队列，重复路径自动去重；文件夹仅扫描当前层级，并按文件名排序。
+支持 PNG、JPEG、GIF、BMP、TIFF 和系统可解码的 WebP。损坏图片跳过并记录日志，
+全部无效时保留原队列；单次最多 500 个源文件，不扫描子文件夹。
+
+源预览下方显示 `< 1 / 总数 >`：左右按钮切换素材，序号框可输入位置，
+按 Enter 或移开焦点跳转；越界或无效序号会恢复当前值。切换素材会更新源预览、
+主预览及 GIF 时间轴，不改变队列顺序、公共参考或输出目录。
+
+队列有多份素材时，输出栏为文件夹，默认是第一份素材所在目录下的
+`MemeConvertStudio-output`。点击“批量转换”按顺序处理全部素材，共用当前人物、
+裁剪、画风、提示词和供应商参数；“生成张数”控制每份素材的副本数量。
+输出如 `001_原文件名-edited.png`、`002_原文件名-edited.gif`，
+多副本再加 `_001`、`_002`。跨文件夹同名素材通过队列序号区分，
+不把多份素材合成拼图或一段 GIF。
+
+开始前检查整个队列的输出，拒绝覆盖任何源图或参考图；已有成品先询问再替换。
+任务进度累计所有素材和副本的帧数，结果下拉框按输出文件名选择成品。
+失败或取消停止后续素材，保留完成的成品与帧缓存；相同队列、参数和输出目录可续作。
+完成的源素材结果会出现在结果列表，当前中断素材的已完成帧保存在缓存中。
+任务中禁止替换队列或切换源素材。关闭插件后恢复单源流程，保留当前预览素材。
+仅导入一份素材时沿用原有单文件输出方式。
+
+### 单源多副本
+
 “生成张数 / GIF 份数”支持 1–10，默认 1。每份独立串行生成，GIF 每份都是完整动画。
 单份沿用所选文件名，多份自动保存为 `名称_001.png`、`名称_002.png` 等，
 GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果”旁下拉选择各份成品。
@@ -60,7 +89,7 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 处理最终帧像素、追加或替换附加要求。附带默认关闭的示例插件和版本化 C ABI SDK。
 安装、开发和缓存规则详见 [PLUGINS.md](PLUGINS.md)。
 
-新增两个默认关闭的插件：
+其他默认关闭的功能插件：
 
 - **局部重绘**：启用后从顶部“局部重绘…”进入，默认读取当前选中的成品，
   可框选矩形、输入修正要求、添加本轮新画风参考并另存；支持静态图和完整 GIF。
@@ -179,7 +208,12 @@ node .\tests\integration.mjs
 
 集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
 
-只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-presets.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-presets.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-presets.exe`。
+只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-source-batch.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-source-batch.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-source-batch.exe`。
+
+多源转换定向检查：`node tests/source-batch.mjs`，仅用本机模拟供应商验证混合图片/GIF 队列、
+导入去重、编号输出、副本、累计进度、失败恢复与跨源图覆盖拦截。
+`node tests/batch.mjs --exe=D:\Projects\MemeStudio\bin\MemeStudio-source-batch.exe --ui-only`
+验证多文件/文件夹拖入、预览切换、输入跳转、忙碌保护及插件启停，并生成 `tmp/tests/ui-source-batch.png`。
 
 流式与参数定向检查为 `node tests/streaming.mjs`，可通过 `--exe=D:\Projects\MemeStudio\bin\MemeStudio-next.exe` 指定构建产物；不调用真实供应商。
 
@@ -257,7 +291,7 @@ Start-Process .\bin\MemeStudio.exe -ArgumentList @("--job", "D:\path\job.json") 
 
 ## 本地版本管理
 
-项目已在 `D:\Projects\MemeStudio` 初始化本地 Git 仓库，默认分支为 `main`，包含功能修改前的初始快照和后续功能提交。没有配置远程仓库或推送。`bin`、`build`、`dist`、`tmp`、发布 ZIP 与生成帧缓存不纳入版本管理；用户密钥仍保存在项目外的系统设置目录。
+项目默认分支为 `main`，远程仓库为 `IFoliageI/MemeConvertStudio`；各插件拥有独立源码分支，入口见本文开头。`bin`、`build`、`dist`、`tmp`、发布 ZIP 与生成帧缓存不纳入版本管理；用户密钥仍保存在项目外的系统设置目录。
 
 ## 限制
 

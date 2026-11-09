@@ -1,6 +1,7 @@
 #include "studio.hpp"
 #include "plugins.hpp"
 #include "presets.hpp"
+#include "batch.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -27,7 +28,8 @@ enum Id {
     Consistency, PreserveText, Resume, Remember, Instruction, Output, BrowseOutput,
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
-    GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets
+    GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
+    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal
 };
 struct State;
 struct View {
@@ -59,6 +61,8 @@ struct State {
     fs::path source, character, resultPath;
     std::vector<fs::path> stylePaths;
     std::vector<fs::path> resultPaths;
+    std::vector<SourceItem> sources;
+    size_t sourceIndex = 0;
     std::vector<PluginInfo> availablePlugins;
     std::vector<std::string> enabledPlugins;
     std::shared_ptr<Plugins> plugins;
@@ -69,6 +73,7 @@ struct State {
     double scrollFraction = 0;
     bool showingResult = false, playing = true, busy = false, closing = false, demo = false,
         fetchingModels = false;
+    bool changingSourcePosition = false;
     Cancel cancel;
     std::thread worker;
     ~State() {
@@ -94,6 +99,10 @@ struct State {
         SendMessageW(log, EM_SCROLLCARET, 0, 0);
     }
     Animation& active() { return showingResult ? resultAnimation : sourceAnimation; }
+    bool batchEnabled() const {
+        return std::find(enabledPlugins.begin(), enabledPlugins.end(),
+            "memestudio.batch-convert") != enabledPlugins.end();
+    }
     void refreshViews() {
         frame = 0; elapsed = 0;
         for (auto& view : views) { view.zoom = 1; view.panX = view.panY = 0; }
@@ -124,6 +133,13 @@ struct State {
             int stride = number(Stride, 1, 600), maximum = number(MaxFrames, 0, 600);
             if (maximum) stride = std::max(stride, (count + maximum - 1) / maximum);
             int calls = ((count + stride - 1) / stride) * number(GenerationCount, 1, 10);
+            if (batchEnabled() && sources.size() > 1) {
+                Job options; options.stride = number(Stride, 1, 600);
+                options.maxFrames = number(MaxFrames, 0, 600);
+                options.generationCount = number(GenerationCount, 1, 10);
+                calls = 0;
+                for (const auto& item : sources) calls += sourceCalls(item, options);
+            }
             uint64_t duration = 0;
             for (auto& item : sourceAnimation.frames) duration += item.delayMs;
             std::wostringstream durationText;
@@ -131,7 +147,9 @@ struct State {
             set(estimate, std::to_wstring(sourceAnimation.frames[0].image.width) + L" × " +
                 std::to_wstring(sourceAnimation.frames[0].image.height) + L"  ·  " +
                 std::to_wstring(count) + L" 帧  ·  " + durationText.str() +
-                L" 秒\r\n预计最多 " + std::to_wstring(calls) + L" 次生成请求");
+                L" 秒\r\n" + (batchEnabled() && sources.size() > 1 ?
+                    std::to_wstring(sources.size()) + L" 份素材 · " : L"") +
+                L"预计最多 " + std::to_wstring(calls) + L" 次生成请求");
         } catch (...) { set(estimate, L"请检查抽帧参数"); }
     }
 };
@@ -313,6 +331,19 @@ static fs::path chooseOutput(State& state) {
     if (dialog->Show(state.window) == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return {};
     ComPtr<IShellItem> item; check(dialog->GetResult(&item), "Output file");
     PWSTR path; check(item->GetDisplayName(SIGDN_FILESYSPATH, &path), "Output path");
+    fs::path result(path); CoTaskMemFree(path); return result;
+}
+static fs::path chooseFolder(State& state, const wchar_t* title) {
+    ComPtr<IFileOpenDialog> dialog;
+    check(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog)), "Folder dialog");
+    dialog->SetOptions(FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    dialog->SetTitle(title);
+    auto status = dialog->Show(state.window);
+    if (status == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return {};
+    check(status, "Select folder");
+    ComPtr<IShellItem> item; check(dialog->GetResult(&item), "Selected folder");
+    PWSTR path; check(item->GetDisplayName(SIGDN_FILESYSPATH, &path), "Folder path");
     fs::path result(path); CoTaskMemFree(path); return result;
 }
 static RECT fit(const Image& image, RECT area) {
@@ -656,6 +687,27 @@ static void loadSettings(State& state) {
         state.logLine(L"读取设置失败：" + wide(error.what()));
     }
 }
+static void updateSourceControls(State& state) {
+    bool enabled = state.batchEnabled();
+    for (int id : {SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal})
+        ShowWindow(GetDlgItem(state.window, id), enabled ? SW_SHOW : SW_HIDE);
+    MoveWindow(state.sourceView, 16, 134, 242, enabled ? 90 : 126, TRUE);
+    state.changingSourcePosition = true;
+    state.set(GetDlgItem(state.window, SourcePosition),
+        state.sources.empty() ? L"0" : std::to_wstring(state.sourceIndex + 1));
+    state.changingSourcePosition = false;
+    state.set(GetDlgItem(state.window, SourceTotal), L"/ " + std::to_wstring(state.sources.size()));
+    EnableWindow(GetDlgItem(state.window, SourcePrevious), enabled && !state.busy && state.sourceIndex > 0);
+    EnableWindow(GetDlgItem(state.window, SourceNext), enabled && !state.busy &&
+        state.sourceIndex + 1 < state.sources.size());
+    EnableWindow(GetDlgItem(state.window, SourcePosition), enabled && !state.busy && !state.sources.empty());
+    EnableWindow(GetDlgItem(state.window, SourceFolder), enabled && !state.busy);
+    bool batch = enabled && state.sources.size() > 1;
+    state.set(GetDlgItem(state.window, Generate), batch ? L"批量转换" : L"开始生成");
+    SendMessageW(state.output, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(
+        batch ? L"批量输出文件夹" : L"输出文件路径"));
+    state.updateEstimate();
+}
 static void loadSource(State& state, const fs::path& path) {
     auto animation = decode(path);
     state.source = path; state.sourceAnimation = std::move(animation);
@@ -663,12 +715,57 @@ static void loadSource(State& state, const fs::path& path) {
     state.resultPaths.clear(); SendMessageW(state.resultChoice, CB_RESETCONTENT, 0, 0);
     ShowWindow(state.resultChoice, SW_HIDE);
     state.previewImage.reset();
+    state.sources = {{path, static_cast<int>(state.sourceAnimation.frames.size()), state.sourceAnimation.animated}};
+    state.sourceIndex = 0;
     state.set(state.sourcePath, path.filename().wstring());
     fs::path output = path.parent_path() / (path.stem().wstring() + L"-edited" +
         (state.sourceAnimation.animated ? L".gif" : L".png"));
     state.set(state.output, output.wstring());
     state.showingResult = false; state.refreshViews(); state.updateEstimate();
-    state.set(state.status, L"素材已就绪");
+    state.set(state.status, L"素材已就绪"); updateSourceControls(state);
+}
+static void importSources(State& state, const std::vector<fs::path>& paths) {
+    if (state.busy || paths.empty()) return;
+    auto sources = collectSources(paths, [&](const auto& message) { state.logLine(message); });
+    // Commit only after validating the new selection, keeping the previous queue on failure.
+    auto directory = sources.front().path.parent_path() / L"MemeConvertStudio-output";
+    loadSource(state, sources.front().path);
+    state.sources = std::move(sources);
+    if (state.sources.size() > 1) state.set(state.output, directory.wstring());
+    updateSourceControls(state);
+    state.set(state.status, L"已导入 " + std::to_wstring(state.sources.size()) + L" 份源素材");
+}
+static void selectSource(State& state, size_t index) {
+    if (state.busy || index >= state.sources.size() || index == state.sourceIndex) return;
+    auto animation = decode(state.sources[index].path);
+    state.sourceIndex = index; state.source = state.sources[index].path;
+    state.sourceAnimation = std::move(animation); state.previewImage.reset(); state.showingResult = false;
+    state.set(state.sourcePath, state.source.filename().wstring());
+    state.refreshViews(); updateSourceControls(state);
+}
+static void commitSourcePosition(State& state) {
+    auto value = state.text(GetDlgItem(state.window, SourcePosition));
+    try {
+        if (value.empty() || value.size() > 3 ||
+            !std::all_of(value.begin(), value.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }))
+            throw Error("请输入有效序号");
+        auto position = std::stoul(value);
+        if (!position || position > state.sources.size()) throw Error("超出素材数量");
+        selectSource(state, position - 1);
+    } catch (const std::exception& error) { state.set(state.status, L"素材序号无效：" + wide(error.what())); }
+    updateSourceControls(state);
+}
+static LRESULT CALLBACK sourcePositionProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+    UINT_PTR, DWORD_PTR owner) {
+    if (message == WM_KEYDOWN && wparam == VK_RETURN) {
+        SendMessageW(reinterpret_cast<HWND>(owner), WM_COMMAND, MAKEWPARAM(SourcePosition, EN_KILLFOCUS), 0);
+        return 0;
+    }
+    if (message == WM_CHAR && wparam == VK_RETURN) return 0;
+    if (message == WM_GETDLGCODE && lparam &&
+        reinterpret_cast<MSG*>(lparam)->wParam == VK_RETURN) return DLGC_WANTMESSAGE;
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, sourcePositionProcedure, 2);
+    return DefSubclassProc(window, message, wparam, lparam);
 }
 static void loadCharacter(State& state, const fs::path& path) {
     auto animation = decode(path);
@@ -690,14 +787,20 @@ static void dropFiles(State& state, HDROP drop, int kind) {
                 point.y >= 274 && point.y <= 500 ? 1 : -1;
         }
         if (kind != 0 && kind != 1) return;
-        if (DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) != 1)
+        auto count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        if ((!state.batchEnabled() || kind == 1) && count != 1)
             throw Error("每个选图区域请一次拖入一个文件");
-        UINT size = DragQueryFileW(drop, 0, nullptr, 0);
-        std::wstring path(size + 1, L'\0');
-        if (!DragQueryFileW(drop, 0, path.data(), size + 1)) throw Error("无法读取拖入的文件");
-        path.resize(size);
-        if (kind == 0) loadSource(state, fs::path(path)); else loadCharacter(state, fs::path(path));
-        state.set(state.status, kind == 0 ? L"已载入原始表情" : L"已载入参考人物");
+        if (count > 500) throw Error("单次最多拖入 500 项");
+        std::vector<fs::path> paths;
+        for (UINT i = 0; i < count; ++i) {
+            UINT size = DragQueryFileW(drop, i, nullptr, 0);
+            std::wstring path(size + 1, L'\0');
+            if (!DragQueryFileW(drop, i, path.data(), size + 1)) throw Error("无法读取拖入的文件");
+            path.resize(size); paths.emplace_back(path);
+        }
+        if (kind == 0 && state.batchEnabled()) importSources(state, paths);
+        else if (kind == 0) loadSource(state, paths.at(0));
+        else loadCharacter(state, paths.at(0));
     } catch (const std::exception& error) {
         state.set(state.status, L"拖入失败"); state.logLine(wide(error.what()));
     }
@@ -720,6 +823,10 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
     state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger);
     state.enabledPlugins = enabled;
     updateRefineEntry(state);
+    if (!state.batchEnabled() && state.sources.size() > 1) {
+        auto current = state.source; loadSource(state, current);
+    }
+    updateSourceControls(state);
 }
 enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, PluginFolder, PluginApply };
 struct PluginDialog {
@@ -860,6 +967,15 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
                 }
                 return TRUE;
             }
+            if (result.value("action", "") == "batch_import" || result.value("action", "") == "batch_folder") {
+                if (!state.batchEnabled()) throw Error("请先启用批量转换插件");
+                if (result["action"] == "batch_import") importSources(state, chooseImages(state.window, true));
+                else {
+                    auto folder = chooseFolder(state, L"选择源表情文件夹");
+                    if (!folder.empty()) importSources(state, {folder});
+                }
+                return TRUE;
+            }
             if (result.contains("instruction"))
                 state.set(state.instruction, wide(result.at("instruction").get<std::string>()));
             if (result.contains("append_instruction")) {
@@ -970,13 +1086,28 @@ static void start(State& state, const Job* refinement) {
     // Validate request shape before starting work or asking to replace an output.
     multipart(job.provider, "", {{"validate", Bytes{1}}});
     editUrl(job.provider.baseUrl);
+    bool batch = !refinement && state.batchEnabled() && state.sources.size() > 1;
     if (job.output.empty()) {
-        auto path = chooseOutput(state); if (path.empty()) return;
+        auto path = batch ? chooseFolder(state, L"选择批量转换输出文件夹") : chooseOutput(state);
+        if (path.empty()) return;
         job.output = path; state.set(state.output, path.wstring());
     }
-    auto outputs = outputPaths(job);
+    std::vector<Job> jobs;
+    auto sources = state.sources;
+    std::vector<fs::path> outputs;
+    if (batch) {
+        jobs = sourceJobs(sources, job, job.output);
+        for (const auto& item : jobs) {
+            auto paths = outputPaths(item);
+            outputs.insert(outputs.end(), paths.begin(), paths.end());
+        }
+    } else outputs = outputPaths(job);
     std::wstring existing;
-    for (const auto& path : outputs) if (fs::exists(path)) existing += L"\n" + path.wstring();
+    int existingCount = 0;
+    for (const auto& path : outputs) if (fs::exists(path)) {
+        if (++existingCount <= 8) existing += L"\n" + path.wstring();
+    }
+    if (existingCount > 8) existing += L"\n…共 " + std::to_wstring(existingCount) + L" 个文件";
     if (!existing.empty() && MessageBoxW(state.window,
         (L"以下输出文件已存在，生成完成后将替换：" + existing).c_str(),
         L"替换输出文件", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
@@ -988,17 +1119,19 @@ static void start(State& state, const Job* refinement) {
     state.logLine((job.refine ? L"局部重绘开始，模型：" : L"任务开始，模型：") + wide(job.provider.model));
     SendMessageW(state.progress, PBM_SETPOS, 0, 0);
     if (state.worker.joinable()) state.worker.join();
-    state.worker = std::thread([&state, job] {
+    state.worker = std::thread([&state, job, batch, jobs, sources] {
         HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         auto completion = std::make_unique<Completion>();
         try {
             check(initialized, "Worker COM");
-            runJob(job, state.cancel, [&](const Progress& progress) {
+            auto reporter = [&](const Progress& progress) {
                 auto event = std::make_unique<Progress>(progress);
                 if (PostMessageW(state.window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(event.get()))) event.release();
-            });
-            completion->outputs = outputPaths(job); completion->success = true;
-            completion->message = L"生成完成，共 " + std::to_wstring(job.generationCount) + L" 份";
+            };
+            if (batch) runSourceJobs(sources, jobs, state.cancel, reporter, completion->outputs);
+            else { runJob(job, state.cancel, reporter); completion->outputs = outputPaths(job); }
+            completion->success = true;
+            completion->message = L"生成完成，共 " + std::to_wstring(completion->outputs.size()) + L" 份";
         } catch (const std::exception& error) {
             completion->success = false; completion->message = wide(error.what());
         }
@@ -1050,13 +1183,21 @@ static void initialize(State& state) {
     SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(state.titleFont), TRUE);
     auto brand = label(L"MEME STUDIO", 184, 23, 160);
     SendMessageW(brand, WM_SETFONT, reinterpret_cast<WPARAM>(state.smallFont), TRUE);
-    label(L"原始表情", 16, 72, 120); button(Source, L"导入…", 176, 66, 82);
+    label(L"原始表情", 16, 72, 96); button(Source, L"导入…", 176, 66, 82);
     state.sourcePath = control(state, state.window, L"STATIC", L"未选择文件", SS_PATHELLIPSIS, 0, 16, 103, 242, 22);
     label(L"参考人物", 16, 280, 120); button(Character, L"导入…", 176, 274, 82);
     state.characterPath = control(state, state.window, L"STATIC", L"未选择文件", SS_PATHELLIPSIS, 0, 16, 310, 242, 22);
     for (int i = 0; i < 3; ++i) { state.views[i].state = &state; state.views[i].kind = i; }
     state.sourceView = CreateWindowExW(0, L"MemeStudioView", L"原始表情预览", WS_CHILD | WS_VISIBLE,
         16, 134, 242, 126, state.window, nullptr, state.instance, &state.views[0]);
+    button(SourceFolder, L"目录", 116, 66, 54);
+    button(SourcePrevious, L"<", 16, 230, 36);
+    auto position = control(state, state.window, L"EDIT", L"0", WS_TABSTOP | ES_NUMBER | ES_CENTER,
+        SourcePosition, 60, 230, 68, 28, true);
+    SendMessageW(position, EM_SETLIMITTEXT, 3, 0);
+    SetWindowSubclass(position, sourcePositionProcedure, 2, reinterpret_cast<DWORD_PTR>(state.window));
+    control(state, state.window, L"STATIC", L"/ 0", SS_LEFT, SourceTotal, 136, 234, 76, 24);
+    button(SourceNext, L">", 222, 230, 36);
     state.characterView = CreateWindowExW(0, L"MemeStudioView", L"人物参考预览与裁剪", WS_CHILD | WS_VISIBLE,
         16, 342, 242, 158, state.window, nullptr, state.instance, &state.views[1]);
     state.mainView = CreateWindowExW(0, L"MemeStudioView", L"工作区预览", WS_CHILD | WS_VISIBLE,
@@ -1113,7 +1254,11 @@ static void initialize(State& state) {
         SendMessageW(tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
     };
     tip(state.characterView, L"拖动框选人物区域");
-    tip(GetDlgItem(state.window, BrowseOutput), L"选择输出文件");
+    tip(GetDlgItem(state.window, BrowseOutput), L"选择输出位置；多源批量转换时选择文件夹");
+    tip(GetDlgItem(state.window, SourcePrevious), L"上一份源素材");
+    tip(GetDlgItem(state.window, SourceNext), L"下一份源素材");
+    tip(position, L"输入素材序号，按 Enter 或移开焦点跳转");
+    tip(GetDlgItem(state.window, SourceFolder), L"导入文件夹当前层级的图片和 GIF");
     tip(state.get(Stride), L"每隔多少源帧生成一帧；合并对应显示时长");
     tip(state.get(MaxFrames), L"自动抽帧，覆盖完整动画；0 表示不设上限");
     tip(state.get(ImageField), L"多张图片重复使用同一个上传字段");
@@ -1129,6 +1274,21 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == SourcePosition) {
+        if (!state.changingSourcePosition && notification == EN_KILLFOCUS && !state.busy)
+            commitSourcePosition(state);
+        return;
+    }
+    if (id == SourcePrevious || id == SourceNext || id == SourceFolder) {
+        if (state.busy || !state.batchEnabled()) return;
+        if (id == SourcePrevious && state.sourceIndex) selectSource(state, state.sourceIndex - 1);
+        if (id == SourceNext) selectSource(state, state.sourceIndex + 1);
+        if (id == SourceFolder) {
+            auto folder = chooseFolder(state, L"选择源表情文件夹");
+            if (!folder.empty()) importSources(state, {folder});
+        }
+        return;
+    }
     if (id == InstructionPresets) { choosePreset(state); return; }
     if ((id == Stride || id == MaxFrames || id == GenerationCount) && notification == EN_CHANGE) { state.updateEstimate(); return; }
     if (id == PluginManage) { managePlugins(state); return; }
@@ -1150,8 +1310,9 @@ static void command(State& state, int id, int notification) {
     if ((id == OutputFormat && notification == CBN_SELCHANGE) ||
         (id == Streaming && notification == BN_CLICKED)) { updateProviderControls(state); return; }
     if (id == Source || id == Character) {
-        auto paths = chooseImages(state.window, false); if (paths.empty()) return;
-        if (id == Source) loadSource(state, paths[0]); else loadCharacter(state, paths[0]);
+        auto paths = chooseImages(state.window, id == Source && state.batchEnabled()); if (paths.empty()) return;
+        if (id == Source && state.batchEnabled()) importSources(state, paths);
+        else if (id == Source) loadSource(state, paths[0]); else loadCharacter(state, paths[0]);
     } else if (id == ClearCrop) {
         state.crop = {}; state.set(state.cropInfo, L"完整参考图"); InvalidateRect(state.characterView, nullptr, FALSE);
     } else if (id == AddStyle) {
@@ -1169,7 +1330,9 @@ static void command(State& state, int id, int notification) {
             SendMessageW(state.styles, LB_DELETESTRING, index, 0);
         }
     } else if (id == BrowseOutput) {
-        auto path = chooseOutput(state); if (!path.empty()) state.set(state.output, path.wstring());
+        auto path = state.batchEnabled() && state.sources.size() > 1 ?
+            chooseFolder(state, L"选择批量转换输出文件夹") : chooseOutput(state);
+        if (!path.empty()) state.set(state.output, path.wstring());
     } else if (id == FetchModels) fetchModels(state);
     else if (id == Generate) start(state);
     else if (id == CancelJob) {
@@ -1232,7 +1395,8 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
                     state->set(state->frameInfo, progress->partial >= 0 ?
                         L"局部 " + std::to_wstring(progress->partial + 1) :
                         std::to_wstring(progress->frame + 1) + L" / " +
-                        std::to_wstring(progress->total / std::max(1, progress->copies)));
+                        std::to_wstring(progress->frameTotal ? progress->frameTotal :
+                            progress->total / std::max(1, progress->copies)));
                 }
             }
             state->logLine(progress->message); return 0;
@@ -1244,6 +1408,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             for (auto control : state->lockControls) EnableWindow(control, TRUE);
             updateProviderControls(*state);
             updateRefineEntry(*state);
+            updateSourceControls(*state);
             EnableWindow(GetDlgItem(window, CancelJob), FALSE);
             if (completion->modelFetch) {
                 state->fetchingModels = false;
@@ -1275,17 +1440,18 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             state->set(state->status, completion->success ? L"生成完成" :
                 state->cancel.stopped ? L"已取消，可继续生成" : L"任务失败，已保留完成帧");
             state->logLine(completion->message);
-            if (completion->success) {
+            if (!completion->outputs.empty()) {
                 state->resultPaths = completion->outputs;
                 SendMessageW(state->resultChoice, CB_RESETCONTENT, 0, 0);
                 for (size_t i = 0; i < state->resultPaths.size(); ++i) {
-                    auto label = L"第 " + std::to_wstring(i + 1) + L" 份";
+                    auto label = completion->outputs[i].filename().wstring();
                     SendMessageW(state->resultChoice, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
                 }
                 SendMessageW(state->resultChoice, CB_SETCURSEL, 0, 0);
                 ShowWindow(state->resultChoice, state->resultPaths.size() > 1 ? SW_SHOW : SW_HIDE);
                 selectResult(*state, 0);
-            } else if (!state->closing && !state->cancel.stopped) {
+            }
+            if (!completion->success && !state->closing && !state->cancel.stopped) {
                 MessageBoxW(window, completion->message.c_str(), L"生成未完成", MB_OK | MB_ICONERROR);
             }
             if (state->closing) DestroyWindow(window);
@@ -1391,19 +1557,21 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             throw Error("Preset append to empty requirements failed");
         state.set(state.instruction, originalInstruction);
         report["instruction_presets"] = "passed";
-        auto drop = [&](HWND target, const fs::path& path) {
-            auto name = path.wstring();
+        auto dropMany = [&](HWND target, const std::vector<fs::path>& paths) {
+            std::wstring name;
+            for (const auto& path : paths) { name += path.wstring(); name.push_back(L'\0'); }
             HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT,
-                sizeof(DROPFILES) + (name.size() + 2) * sizeof(wchar_t));
+                sizeof(DROPFILES) + (name.size() + 1) * sizeof(wchar_t));
             if (!memory) throw Error("Cannot allocate drop fixture");
             auto* files = static_cast<DROPFILES*>(GlobalLock(memory));
             if (!files) { GlobalFree(memory); throw Error("Cannot lock drop fixture"); }
             files->pFiles = sizeof(DROPFILES); files->fWide = TRUE;
             memcpy(reinterpret_cast<BYTE*>(files) + sizeof(DROPFILES), name.c_str(),
-                (name.size() + 1) * sizeof(wchar_t));
+                name.size() * sizeof(wchar_t));
             GlobalUnlock(memory);
             SendMessageW(target, WM_DROPFILES, reinterpret_cast<WPARAM>(memory), 0);
         };
+        auto drop = [&](HWND target, const fs::path& path) { dropMany(target, {path}); };
         drop(state.characterView, demo / L"中文路径-人物.png");
         if (state.character.filename() != L"中文路径-人物.png") throw Error("Unicode reference drop failed");
         auto character = state.character;
@@ -1456,6 +1624,45 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             throw Error("Upscale dialog configuration failed");
         applyPlugins(state, {});
         report["upscale_plugin"] = "passed";
+        applyPlugins(state, {"memestudio.batch-convert"});
+        auto batchAction = state.plugins->command("memestudio.batch-convert", "import-files", Json::object(), window);
+        if (batchAction.value("action", "") != "batch_import") throw Error("Batch plugin command failed");
+        dropMany(state.sourceView, {demo / L"source.png", demo / L"source.gif", demo / L"source.png"});
+        if (state.sources.size() != 2 || state.sourceIndex != 0 ||
+            !(GetWindowLongW(GetDlgItem(window, SourcePosition), GWL_STYLE) & WS_VISIBLE) ||
+            IsWindowEnabled(GetDlgItem(window, SourcePrevious)))
+            throw Error("Multi-source drop or navigator defaults failed");
+        auto batchOutput = state.text(state.output);
+        command(state, SourceNext, BN_CLICKED);
+        if (state.sourceIndex != 1 || !state.sourceAnimation.animated || state.text(state.output) != batchOutput)
+            throw Error("Next source preview failed");
+        state.set(GetDlgItem(window, SourcePosition), L"1");
+        SendMessageW(GetDlgItem(window, SourcePosition), WM_KEYDOWN, VK_RETURN, 0);
+        if (state.sourceIndex != 0 || state.sourceAnimation.animated) throw Error("Source index entry failed");
+        state.set(GetDlgItem(window, SourcePosition), L"500");
+        command(state, SourcePosition, EN_KILLFOCUS);
+        if (state.sourceIndex || state.text(GetDlgItem(window, SourcePosition)) != L"1")
+            throw Error("Invalid source index changed preview");
+        state.busy = true;
+        dropMany(state.sourceView, {demo / L"character.png", demo / L"style.png"});
+        command(state, SourceNext, BN_CLICKED); state.busy = false;
+        if (state.sourceIndex || state.sources.size() != 2) throw Error("Busy batch selection changed");
+        auto folder = demo / L"batch-import";
+        fs::create_directories(folder / L"nested");
+        fs::copy_file(demo / L"source.png", folder / L"01.png", fs::copy_options::overwrite_existing);
+        fs::copy_file(demo / L"source.gif", folder / L"02.gif", fs::copy_options::overwrite_existing);
+        fs::copy_file(demo / L"source.png", folder / L"nested/ignored.png", fs::copy_options::overwrite_existing);
+        writeFile(folder / L"invalid.png", {0, 1, 2});
+        drop(state.sourceView, folder);
+        if (state.sources.size() != 2 || state.sources.front().path.filename() != L"01.png")
+            throw Error("Folder drop, sorting or invalid-image handling failed");
+        snapshot(1120, 830, L"ui-source-batch.png");
+        command(state, SourceNext, BN_CLICKED);
+        applyPlugins(state, {});
+        if (state.sources.size() != 1 || (GetWindowLongW(GetDlgItem(window, SourcePosition), GWL_STYLE) & WS_VISIBLE))
+            throw Error("Disabling batch plugin did not restore single-source workflow");
+        loadSource(state, demo / L"source.gif");
+        report["source_batch_plugin"] = "passed";
         // Repaint after imports so crop coordinates refer to the current reference image.
         snapshot(1120, 830, L"ui-compact.png");
         // Exercise the window's own crop handler using its rendered image bounds.

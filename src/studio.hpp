@@ -121,6 +121,7 @@ struct Progress {
     std::shared_ptr<Image> preview;
     int frame = -1, partial = -1;
     int copy = 0, copies = 1;
+    int frameTotal = 0;
 };
 using Reporter = std::function<void(const Progress&)>;
 std::string prompt(const Job& job, int index, int total, size_t styleCount, bool anchor,

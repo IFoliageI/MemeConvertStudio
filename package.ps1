@@ -11,7 +11,7 @@ foreach ($name in @("README.md", "PLUGINS.md", "VALIDATION.md", "CMakeLists.txt"
     Copy-Item -LiteralPath (Join-Path $project $name) -Destination $package -Force
 }
 Copy-Item -LiteralPath $executable -Destination (Join-Path $package "bin\MemeStudio.exe") -Force
-foreach ($pluginName in @("example", "local-redraw", "waifu2x")) {
+foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert")) {
     $pluginOutput = Join-Path $package "bin\plugins\$pluginName"
     New-Item -ItemType Directory -Force -Path $pluginOutput | Out-Null
     foreach ($name in @("$pluginName.dll", "plugin.json")) {

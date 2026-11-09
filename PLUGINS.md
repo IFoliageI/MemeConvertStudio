@@ -66,8 +66,9 @@ frame_index、frame_count、source_frame_index、variation_index（索引均从 
 
 ## 构建
 
-`.\build.ps1` 同时构建程序和示例 DLL，将示例放到 `bin/plugins/example`。
-同时构建 `local-redraw` 与 `waifu2x` 两个插件；CMake 也会复制三者到程序旁。
+`.\build.ps1` 同时构建程序与 `example`、`local-redraw`、`waifu2x`、
+`batch-convert` 四个插件，分别放到 `bin/plugins/<插件目录>`。
+CMake 也会复制四个插件到程序旁。
 SDK 不依赖 OpenAI SDK 或第三方框架。
 
 命令行任务可设置 `"plugins":["memestudio.example"]`；
@@ -98,6 +99,41 @@ PNG 保留选区外原像素和 Alpha。GIF 在合成后重新量化为 256 色�
 默认文件名追加 `-retouched`，已有同名文件则继续编号。
 不会覆盖作为输入的产物；可逐次对新的结果继续修正。
 取消窗口不会发起 API 请求。生成阶段可使用主窗口“取消”。
+
+## 批量转换
+
+插件 ID 为 `memestudio.batch-convert`，默认关闭。启用后，源素材支持多选文件、
+拖入多个图片/GIF/文件夹，或从“目录”选择文件夹。文件夹导入当前层级，
+按文件名排序，不扫描子目录；重复路径去重，损坏图片跳过并写入日志，最多 500 个源文件。
+每次导入替换队列；无有效图片则保留旧队列。
+
+预览下方 `< 当前序号 / 总数 >` 可用箭头切换，也可输入序号后按 Enter 或移开焦点。
+生成时禁止更换素材。多源转换输出到文件夹，并用队列序号为每份成品命名，
+“生成张数”分别应用到每个源文件。每份 GIF 保留独立的帧顺序、时长与循环。
+关闭插件后以当前预览素材恢复单源流程。
+
+命令 `import-files` 返回 `{"action":"batch_import"}`，
+`import-folder` 返回 `{"action":"batch_folder"}`。导入、导航及队列调度由新版宿主实现；
+DLL 不重复实现网络和图像处理，也不改变提示词或缓存标识。
+独立 `plugin-batch-convert` 分支仅包含对应插件源码、清单、ABI 头文件、构建脚本和 README。
+
+命令行也可调用相同队列流程。`sources` 替代 `source`，接受文件及文件夹路径，
+`output` 必须是文件夹，显式启用批量插件：
+
+```json
+{
+  "sources": ["D:/memes/folder", "D:/memes/another.gif"],
+  "character": "D:/references/character.png",
+  "output": "D:/converted",
+  "plugins": ["memestudio.batch-convert"],
+  "base_url": "https://your-provider.example/v1",
+  "model": "your-image-model",
+  "count": 1
+}
+```
+
+队列共享当前人物、画风、参数与可选超分。失败或取消后停止后续任务，
+重跑相同队列可复用缓存。整个队列会先检查输出路径，不允许覆盖任何输入素材。
 
 ## Waifu2x 输入/输出超分
 
