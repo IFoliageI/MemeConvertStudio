@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "memestudio.batch-convert",
+  "name": "批量转换",
+  "version": "1.0.0",
+  "description": "多选或拖入图片、GIF 和文件夹，切换素材预览并逐项转换。",
+  "library": "batch-convert.dll",
+  "commands": [
+    {"id": "import-files", "title": "选择多份源素材…"},
+    {"id": "import-folder", "title": "导入素材文件夹…"}
+  ]
+}
