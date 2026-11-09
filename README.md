@@ -46,7 +46,15 @@ dist/plugins/batch-convert/plugin.json
 将 `dist/plugins/batch-convert` 目录放到主程序旁的 `plugins` 目录。
 打开“插件管理”，重新扫描，勾选“批量转换”并应用；插件默认关闭。
 
-## 使用
+## 自动编译
+
+推送到本插件分支或向本分支提交 PR，会运行 GitHub Actions 的 `Build Plugin`。
+也可在 Actions 中选择该工作流，选择本分支并点击 `Run workflow`。
+工作流只编译本插件，不构建主程序、不调用图像 API。
+成功后下载运行详情页的 `MemeStudio-Plugin-Windows-x64` 构建产物，
+解压后将 `plugins` 目录放到兼容的主程序旁；产物保存 14 天。
+
+## 使用步骤
 
 1. 在“原始表情”点击“导入…”多选文件，或“目录”选择文件夹，也可拖入源素材预览区。
 2. 用预览下的箭头或序号框查看素材。一次最多导入 500 个文件，每次导入替换整个队列。
