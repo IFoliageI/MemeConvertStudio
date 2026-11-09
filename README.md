@@ -26,6 +26,15 @@ dist/plugins/example/plugin.json
 
 Copy the `plugins` directory from `dist` beside a compatible MemeConvertStudio executable. In Plugin Manager, rescan, enable **Example extension**, and apply. The plugin is disabled by default.
 
+## GitHub Actions
+
+Pushes to this plugin branch and pull requests targeting it run `Build Plugin`.
+You can also select this branch under Actions > Build Plugin > Run workflow.
+The workflow builds only this plugin, without running tests or calling image APIs.
+Download `MemeStudio-Plugin-Windows-x64` from the completed run's Artifacts section
+and place the extracted `plugins` directory beside a compatible host executable.
+Artifacts are retained for 14 days.
+
 ## Behavior
 
 The prompt hook adds a short instruction to preserve distinctive facial features. The `identity-note` command appends a character-consistency requirement to the host's additional-instructions field. This is an example extension, not a replacement for the application's image-editing pipeline.
