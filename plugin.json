@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "memestudio.prompt-draw",
+  "name": "无图绘制",
+  "version": "1.0.0",
+  "description": "通过提示词生成新图像，可选画风参考与流式预览，无需源表情或人物图。",
+  "library": "prompt-draw.dll",
+  "commands": [
+    {"id": "draw", "title": "通过提示词绘制…"}
+  ]
+}
