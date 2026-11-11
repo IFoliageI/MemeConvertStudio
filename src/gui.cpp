@@ -99,10 +99,10 @@ struct State {
         SendMessageW(log, EM_SCROLLCARET, 0, 0);
     }
     Animation& active() { return showingResult ? resultAnimation : sourceAnimation; }
-    bool batchEnabled() const {
-        return std::find(enabledPlugins.begin(), enabledPlugins.end(),
-            "memestudio.batch-convert") != enabledPlugins.end();
+    bool pluginEnabled(const std::string& id) const {
+        return plugins && std::find(enabledPlugins.begin(), enabledPlugins.end(), id) != enabledPlugins.end();
     }
+    bool batchEnabled() const { return pluginEnabled("memestudio.batch-convert"); }
     void refreshViews() {
         frame = 0; elapsed = 0;
         for (auto& view : views) { view.zoom = 1; view.panX = view.panY = 0; }
@@ -806,11 +806,20 @@ static void dropFiles(State& state, HDROP drop, int kind) {
     }
 }
 static void start(State& state, const Job* refinement = nullptr);
-static void updateRefineEntry(State& state) {
-    EnableWindow(GetDlgItem(state.window, RefineEntry), !state.busy &&
-        std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.local-redraw") != state.enabledPlugins.end());
-    EnableWindow(GetDlgItem(state.window, DrawingEntry), !state.busy &&
-        std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.prompt-draw") != state.enabledPlugins.end());
+static void updatePluginEntries(State& state) {
+    int x = 380;
+    for (const auto& [id, plugin] : {
+        std::pair{RefineEntry, "memestudio.local-redraw"},
+        std::pair{DrawingEntry, "memestudio.prompt-draw"}}) {
+        auto entry = GetDlgItem(state.window, id);
+        bool loaded = state.pluginEnabled(plugin);
+        if (loaded) {
+            MoveWindow(entry, x, 15, 120, 30, TRUE);
+            x += 130;
+        }
+        EnableWindow(entry, loaded && !state.busy);
+        ShowWindow(entry, loaded ? SW_SHOW : SW_HIDE);
+    }
 }
 static Job drawingOptions(State& state) {
     Job job; job.generate = true;
@@ -828,7 +837,8 @@ static Job drawingOptions(State& state) {
 static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
     state.plugins.reset();
     state.enabledPlugins.clear();
-    updateRefineEntry(state);
+    updatePluginEntries(state);
+    updateSourceControls(state);
     auto logger = [window = state.window](const std::wstring& message) {
         auto event = std::make_unique<Progress>();
         event->message = L"插件：" + message;
@@ -837,7 +847,7 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
     };
     state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger);
     state.enabledPlugins = enabled;
-    updateRefineEntry(state);
+    updatePluginEntries(state);
     if (!state.batchEnabled() && state.sources.size() > 1) {
         auto current = state.source; loadSource(state, current);
     }
@@ -1270,9 +1280,12 @@ static void initialize(State& state) {
     state.settings = CreateWindowExW(WS_EX_CONTROLPARENT, L"MemeStudioSettings", L"供应商和生成参数",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL, 850, 60, 332, 760, state.window, nullptr, state.instance, &state);
     createSettings(state); loadSettings(state); updateProviderControls(state);
+    auto enabled = std::move(state.enabledPlugins);
+    state.enabledPlugins.clear();
+    updatePluginEntries(state); updateSourceControls(state);
     try {
         state.availablePlugins = discoverPlugins(pluginDirectory());
-        auto enabled = state.enabledPlugins; applyPlugins(state, enabled);
+        applyPlugins(state, enabled);
     } catch (const std::exception& error) { state.logLine(L"插件未启用：" + wide(error.what())); }
     HWND tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
         WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -1446,7 +1459,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             state->busy = false;
             for (auto control : state->lockControls) EnableWindow(control, TRUE);
             updateProviderControls(*state);
-            updateRefineEntry(*state);
+            updatePluginEntries(*state);
             updateSourceControls(*state);
             EnableWindow(GetDlgItem(window, CancelJob), FALSE);
             if (completion->modelFetch) {
@@ -1632,6 +1645,19 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         report["drop_and_count"] = "passed";
         if (!state.plugins || !state.plugins->fingerprint().empty())
             throw Error("Plugins must be disabled by default");
+        auto visible = [&](int id) { return (GetWindowLongW(GetDlgItem(window, id), GWL_STYLE) & WS_VISIBLE) != 0; };
+        auto checkPluginVisibility = [&](bool redraw, bool drawing, bool batch) {
+            if (visible(RefineEntry) != redraw || visible(DrawingEntry) != drawing)
+                throw Error("Plugin toolbar visibility does not match loaded plugins");
+            for (int id : {SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal})
+                if (visible(id) != batch) throw Error("Batch controls visibility does not match loaded plugin");
+            if (drawing) {
+                RECT bounds{}; GetWindowRect(GetDlgItem(window, DrawingEntry), &bounds);
+                MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&bounds), 2);
+                if (bounds.left != (redraw ? 510 : 380)) throw Error("Plugin toolbar left an empty slot");
+            }
+        };
+        checkPluginVisibility(false, false, false);
         auto savedInstruction = state.text(state.instruction);
         applyPlugins(state, {"memestudio.example"});
         if (state.plugins->fingerprint().size() != 1 ||
@@ -1644,6 +1670,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         state.set(state.instruction, savedInstruction);
         report["plugin_hooks"] = "passed";
         applyPlugins(state, {"memestudio.local-redraw"});
+        checkPluginVisibility(true, false, false);
         auto refineAction = state.plugins->command("memestudio.local-redraw", "refine-result",
             Json::object(), window);
         if (refineAction.value("action", "") != "refine") throw Error("Redraw plugin action failed");
@@ -1664,6 +1691,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         applyPlugins(state, {});
         report["upscale_plugin"] = "passed";
         applyPlugins(state, {"memestudio.prompt-draw"});
+        checkPluginVisibility(false, true, false);
         auto drawingAction = state.plugins->command("memestudio.prompt-draw", "draw", Json::object(), window);
         if (drawingAction.value("action", "") != "prompt_draw" ||
             !IsWindowEnabled(GetDlgItem(window, DrawingEntry))) throw Error("Drawing plugin entry failed");
@@ -1674,7 +1702,31 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         applyPlugins(state, {});
         if (IsWindowEnabled(GetDlgItem(window, DrawingEntry))) throw Error("Disabled drawing entry is active");
         report["drawing_plugin"] = "passed";
+        checkPluginVisibility(false, false, false);
+        applyPlugins(state, {"memestudio.local-redraw", "memestudio.prompt-draw", "memestudio.batch-convert"});
+        checkPluginVisibility(true, true, true);
+        snapshot(1120, 830, L"ui-plugins-enabled.png");
+        state.busy = true;
+        updatePluginEntries(state); updateSourceControls(state);
+        checkPluginVisibility(true, true, true);
+        if (IsWindowEnabled(GetDlgItem(window, RefineEntry)) ||
+            IsWindowEnabled(GetDlgItem(window, DrawingEntry)) ||
+            IsWindowEnabled(GetDlgItem(window, SourceFolder)))
+            throw Error("Busy plugin controls are active");
+        state.busy = false;
+        updatePluginEntries(state); updateSourceControls(state);
+        if (!IsWindowEnabled(GetDlgItem(window, RefineEntry)) ||
+            !IsWindowEnabled(GetDlgItem(window, DrawingEntry)))
+            throw Error("Idle plugin entries did not reactivate");
+        bool loadFailed = false;
+        try { applyPlugins(state, {"memestudio.local-redraw", "memestudio.missing-ui-check"}); }
+        catch (const Error&) { loadFailed = true; }
+        if (!loadFailed || state.plugins || !state.enabledPlugins.empty())
+            throw Error("Failed plugin application retained loaded state");
+        checkPluginVisibility(false, false, false);
+        report["plugin_visibility"] = "passed";
         applyPlugins(state, {"memestudio.batch-convert"});
+        checkPluginVisibility(false, false, true);
         auto batchAction = state.plugins->command("memestudio.batch-convert", "import-files", Json::object(), window);
         if (batchAction.value("action", "") != "batch_import") throw Error("Batch plugin command failed");
         dropMany(state.sourceView, {demo / L"source.png", demo / L"source.gif", demo / L"source.png"});
@@ -1709,6 +1761,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         snapshot(1120, 830, L"ui-source-batch.png");
         command(state, SourceNext, BN_CLICKED);
         applyPlugins(state, {});
+        checkPluginVisibility(false, false, false);
         if (state.sources.size() != 1 || (GetWindowLongW(GetDlgItem(window, SourcePosition), GWL_STYLE) & WS_VISIBLE))
             throw Error("Disabling batch plugin did not restore single-source workflow");
         loadSource(state, demo / L"source.gif");
