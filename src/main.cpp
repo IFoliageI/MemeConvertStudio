@@ -39,6 +39,12 @@ int wmain(int argc, wchar_t** argv) {
             Job job;
             job.source = wide(config.value("source", ""));
             job.refine = config.value("mode", "replace") == "refine";
+            job.generate = config.value("mode", "replace") == "generate";
+            if (job.generate) {
+                const auto enabled = config.value("plugins", std::vector<std::string>{});
+                if (std::find(enabled.begin(), enabled.end(), "memestudio.prompt-draw") == enabled.end())
+                    throw Error("请先启用无图绘制插件");
+            }
             if (config.contains("upscale")) job.upscale = upscaleOptions(config["upscale"]);
             job.character = wide(config.value("character", ""));
             job.output = wide(config.at("output").get<std::string>());
@@ -88,7 +94,7 @@ int wmain(int argc, wchar_t** argv) {
                          {"copy_index", progress.copy}, {"count", progress.copies}});
             };
             if (config.contains("sources")) {
-                if (job.refine) throw Error("批量转换不支持局部重绘模式");
+                if (job.refine || job.generate) throw Error("源素材队列仅支持人物替换模式");
                 const auto enabled = config.value("plugins", std::vector<std::string>{});
                 if (std::find(enabled.begin(), enabled.end(), "memestudio.batch-convert") == enabled.end())
                     throw Error("请先启用批量转换插件");

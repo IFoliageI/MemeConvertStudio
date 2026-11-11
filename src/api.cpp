@@ -45,8 +45,18 @@ std::wstring editUrl(std::wstring base) {
         size_t count = wcslen(part);
         return base.size() >= count && base.compare(base.size() - count, count, part) == 0;
     };
-    if (!suffix(L"/images/edits")) base += suffix(L"/images") ? L"/edits" : L"/images/edits";
+    if (suffix(L"/images/generations")) {
+        base.resize(base.size() - wcslen(L"/generations")); base += L"/edits";
+    } else if (!suffix(L"/images/edits")) base += suffix(L"/images") ? L"/edits" : L"/images/edits";
     return base + query;
+}
+std::wstring generationUrl(const std::wstring& base) {
+    auto url = editUrl(base);
+    auto query = url.find(L'?');
+    auto suffix = query == std::wstring::npos ? L"" : url.substr(query);
+    if (query != std::wstring::npos) url.resize(query);
+    url.resize(url.size() - wcslen(L"/edits"));
+    return url + L"/generations" + suffix;
 }
 std::wstring modelsUrl(const std::wstring& base) {
     auto url = editUrl(base);
@@ -63,9 +73,7 @@ static bool safeName(const std::string& value) {
             return std::isalnum(c) || c == '_' || c == '-' || c == '[' || c == ']' || c == '.';
         });
 }
-Multipart multipart(const Provider& provider, const std::string& text, const std::vector<Upload>& images) {
-    if (images.empty() || images.size() > 16) throw Error("上传图片数量必须在 1 到 16 之间");
-    if (!safeName(provider.imageField)) throw Error("无效的图片上传字段名称");
+static Json imageFields(const Provider& provider, const std::string& text) {
     auto first = provider.model.find_first_not_of(" \t\r\n");
     auto last = provider.model.find_last_not_of(" \t\r\n");
     if (first == std::string::npos) throw Error("请填写模型名称");
@@ -85,6 +93,36 @@ Multipart multipart(const Provider& provider, const std::string& text, const std
         throw Error("Compression 仅适用于 jpeg 或 webp 返回格式");
     if (provider.stream && (provider.partialImages < 1 || provider.partialImages > 3))
         throw Error("局部预览数量必须为 1 到 3");
+    Json fields{{"model", model}, {"prompt", text}};
+    if (!provider.quality.empty()) fields["quality"] = provider.quality;
+    if (!provider.size.empty()) fields["size"] = provider.size;
+    if (!provider.complexity.empty()) fields["complexity"] = provider.complexity;
+    if (!provider.outputFormat.empty()) fields["output_format"] = provider.outputFormat;
+    if (provider.compression >= 0) fields["output_compression"] = provider.compression;
+    if (provider.stream) {
+        fields["stream"] = true;
+        fields["partial_images"] = provider.partialImages;
+    }
+    for (const auto& [key, value] : provider.extra.items()) {
+        if (!safeName(key)) throw Error("扩展参数字段名无效");
+        if (key == "model" || key == "prompt" || key == "image" || key == "image[]" ||
+            key == provider.imageField || key == "n" || key == "stream")
+            throw Error("扩展参数不能覆盖 model、prompt、image、n 或 stream");
+        if (key == "quality" || key == "size" || key == "complexity" || key == "output_format" ||
+            key == "output_compression" || key == "partial_images")
+            throw Error("请通过对应选项设置 quality、size、complexity、返回格式、压缩率和局部预览数量");
+        if (!value.is_null()) fields[key] = value;
+    }
+    return fields;
+}
+Json generationBody(const Provider& provider, const std::string& text) {
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos) throw Error("请填写绘制提示词");
+    return imageFields(provider, text);
+}
+Multipart multipart(const Provider& provider, const std::string& text, const std::vector<Upload>& images) {
+    if (images.empty() || images.size() > 16) throw Error("上传图片数量必须在 1 到 16 之间");
+    if (!safeName(provider.imageField)) throw Error("无效的图片上传字段名称");
+    auto fields = imageFields(provider, text);
     GUID guid{}; check(CoCreateGuid(&guid), "Multipart boundary");
     wchar_t name[48]{}; StringFromGUID2(guid, name, 48);
     // StringFromGUID2 includes braces, which are not valid MIME boundary characters.
@@ -95,26 +133,8 @@ Multipart multipart(const Provider& provider, const std::string& text, const std
         append(body.data, "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
             key + "\"\r\n\r\n" + value + "\r\n");
     };
-    field("model", model);
-    field("prompt", text);
-    if (!provider.quality.empty()) field("quality", provider.quality);
-    if (!provider.size.empty()) field("size", provider.size);
-    if (!provider.complexity.empty()) field("complexity", provider.complexity);
-    if (!provider.outputFormat.empty()) field("output_format", provider.outputFormat);
-    if (provider.compression >= 0) field("output_compression", std::to_string(provider.compression));
-    if (provider.stream) {
-        field("stream", "true");
-        field("partial_images", std::to_string(provider.partialImages));
-    }
-    for (const auto& [key, value] : provider.extra.items()) {
-        if (key == "model" || key == "prompt" || key == "image" || key == "image[]" ||
-            key == provider.imageField || key == "n" || key == "stream")
-            throw Error("扩展参数不能覆盖 model、prompt、image、n 或 stream");
-        if (key == "quality" || key == "size" || key == "complexity" || key == "output_format" ||
-            key == "output_compression" || key == "partial_images")
-            throw Error("请通过对应选项设置 quality、size、complexity、返回格式、压缩率和局部预览数量");
-        if (!value.is_null()) field(key, value.is_string() ? value.get<std::string>() : value.dump());
-    }
+    for (const auto& [key, value] : fields.items())
+        field(key, value.is_string() ? value.get<std::string>() : value.dump());
     size_t index = 0;
     for (const auto& image : images) {
         if (image.data.empty() || image.data.size() > 50 * 1024 * 1024)
@@ -312,12 +332,11 @@ public:
         return std::move(result);
     }
 };
-Image edit(const Provider& provider, const std::string& text, const std::vector<Upload>& images, Cancel& cancel,
-    const std::function<void(const Image&, int)>& preview) {
-    auto body = multipart(provider, text, images);
+static Image imageRequest(const Provider& provider, const std::wstring& url, const Multipart& body,
+    Cancel& cancel, const std::function<void(const Image&, int)>& preview) {
     auto headers = authorization(provider);
     ImageStream stream(provider, preview);
-    auto response = request(editUrl(provider.baseUrl), L"POST",
+    auto response = request(url, L"POST",
         headers + L"\r\nContent-Type: " + wide(body.type) +
             (provider.stream ? L"\r\nAccept: text/event-stream" : L""),
         body.data, provider.timeoutSeconds, cancel, provider.stream ?
@@ -331,12 +350,23 @@ Image edit(const Provider& provider, const std::string& text, const std::vector<
     if (item.contains("b64_json") && item["b64_json"].is_string())
         return decode(unbase64(item["b64_json"].get<std::string>()));
     if (item.contains("url") && item["url"].is_string()) {
-        auto url = item["url"].get<std::string>();
-        if (url.rfind("data:", 0) == 0) return decode(unbase64(url));
-        auto download = request(wide(url), L"GET", L"", {}, provider.timeoutSeconds, cancel);
+        auto imageUrl = item["url"].get<std::string>();
+        if (imageUrl.rfind("data:", 0) == 0) return decode(unbase64(imageUrl));
+        auto download = request(wide(imageUrl), L"GET", L"", {}, provider.timeoutSeconds, cancel);
         if (download.status != 200) throw Error("生成图片下载失败，HTTP " + std::to_string(download.status));
         return decode(download.data);
     }
     throw Error("供应商响应缺少 b64_json 或 url 图像");
+}
+Image edit(const Provider& provider, const std::string& text, const std::vector<Upload>& images, Cancel& cancel,
+    const std::function<void(const Image&, int)>& preview) {
+    return imageRequest(provider, editUrl(provider.baseUrl), multipart(provider, text, images), cancel, preview);
+}
+Image generate(const Provider& provider, const std::string& text, const std::vector<Upload>& styles,
+    Cancel& cancel, const std::function<void(const Image&, int)>& preview) {
+    if (!styles.empty()) return edit(provider, text, styles, cancel, preview);
+    auto serialized = generationBody(provider, text).dump();
+    return imageRequest(provider, generationUrl(provider.baseUrl),
+        {"application/json", Bytes(serialized.begin(), serialized.end())}, cancel, preview);
 }
 }

@@ -84,10 +84,15 @@ struct Cancel {
 struct Upload { std::string name; Bytes data; };
 struct Multipart { std::string type; Bytes data; };
 std::wstring editUrl(std::wstring base);
+std::wstring generationUrl(const std::wstring& base);
 std::wstring modelsUrl(const std::wstring& base);
 std::vector<std::string> listModels(const Provider& provider, Cancel& cancel);
 Multipart multipart(const Provider& provider, const std::string& prompt,
                     const std::vector<Upload>& images);
+Json generationBody(const Provider& provider, const std::string& prompt);
+Image generate(const Provider& provider, const std::string& prompt,
+               const std::vector<Upload>& styles, Cancel& cancel,
+               const std::function<void(const Image&, int)>& preview = {});
 Image edit(const Provider& provider, const std::string& prompt,
            const std::vector<Upload>& images, Cancel& cancel,
            const std::function<void(const Image&, int)>& preview = {});
@@ -112,6 +117,7 @@ struct Job {
     bool preserveText = true;
     bool resume = true;
     bool refine = false;
+    bool generate = false;
     Crop region;
     UpscaleOptions upscale;
 };
@@ -130,6 +136,8 @@ void runJob(const Job& job, Cancel& cancel, const Reporter& report);
 std::vector<fs::path> outputPaths(const Job& job);
 Image preserveOutside(const Image& original, const Image& edited, const Crop& region);
 bool editRefinement(HINSTANCE instance, HWND owner, Job& job, bool capture = false);
+bool editDrawing(HINSTANCE instance, HWND owner, Job& job, bool capture = false);
+void runDrawing(const Job& job, Cancel& cancel, const Reporter& report);
 Json upscaleJson(const UpscaleOptions& options);
 UpscaleOptions upscaleOptions(const Json& value);
 bool editUpscale(HINSTANCE instance, HWND owner, UpscaleOptions& options, bool capture = false);

@@ -45,11 +45,14 @@ __cdecl MemeStudioGetPluginV1(void)`。返回静态存储的结构，设置 `str
   宿主还提供 `{"action":"refine"}` 打开已有产物修正流程，
   `{"action":"configure_upscale"}` 打开外部 Waifu2x 设置。服务由宿主执行，
   插件无需持有供应商配置或重复实现网络传输。
+  `{"action":"prompt_draw"}` 打开无图绘制窗口；需要启用 `memestudio.prompt-draw`。
 - `shutdown`：卸载前释放插件资源；初始化失败时也会调用，须容忍部分初始化。
 
 命令上下文包含 source、character、output、当前选中成品 result 路径和 instruction；帧回调包含
 frame_index、frame_count、source_frame_index、variation_index（索引均从 0 开始）。
-帧上下文还包含 mode（replace/refine）和 region 对象（x、y、width、height）。
+帧上下文还包含 mode（replace/refine/generate）；replace/refine 提供 region 对象
+（x、y、width、height）。generate 的 source、character 为空，frame_index 为 0、
+frame_count 为 1，variation_index 区分生成副本。
 不会传入供应商密钥。插件自行管理配置和资源，不应依赖进程当前工作目录。
 
 回调和宿主日志均为 `__cdecl`；返回字符串由插件持有，至少有效至下一次回调，
@@ -67,13 +70,59 @@ frame_index、frame_count、source_frame_index、variation_index（索引均从 
 ## 构建
 
 `.\build.ps1` 同时构建程序与 `example`、`local-redraw`、`waifu2x`、
-`batch-convert` 四个插件，分别放到 `bin/plugins/<插件目录>`。
-CMake 也会复制四个插件到程序旁。
+`batch-convert`、`prompt-draw` 五个插件，分别放到 `bin/plugins/<插件目录>`。
+CMake 也会复制五个插件到程序旁。
 SDK 不依赖 OpenAI SDK 或第三方框架。
 
 命令行任务可设置 `"plugins":["memestudio.example"]`；
 可选 `"plugin_directory":"D:/my-plugins"` 指定其他插件目录。
 不填写 plugins 时不加载插件。CLI 遇到不可用插件会直接报错。
+
+## 无图绘制
+
+插件 ID 为 `memestudio.prompt-draw`，默认关闭。启用后点击主窗口顶部
+“无图绘制…”或执行插件命令“通过提示词绘制…”。命令 `draw` 返回
+`{"action":"prompt_draw"}`，宿主提供独立提示词、画风列表和另存窗口。
+
+无需 source/character。画风图可选，最多 8 张，支持多选、拖入和预览；
+窗口初始带入主界面附加要求及画风图，修改不写回这些公共输入。
+无画风图时向 `/images/generations` 发送 JSON，有画风图时向 `/images/edits`
+发送 multipart，仅上传画风图，按提示词定义新内容。完整编辑或生成端点会自动归一化，
+保留 URL 查询参数；生成与模型列表使用同一 Base URL。
+不兼容仅提供 Chat Completions 图片输出或异步任务轮询的供应商。
+
+当前模型、参数、张数、流式及可选超分设置均复用。输出为 PNG，保留返回尺寸，
+不缩放为源表情尺寸；GIF 画风参考只取首帧。原始表情、人物图、裁剪和动画参数不参与。
+输入超分仅用于画风图；无画风图时跳过输入超分配置。
+输出超分在本地缓存的生成图之后执行，尺寸上限由外部工具接口检查；
+由于生成尺寸由供应商决定，输出超分超限可能在生成完成后才报错，但 API 缓存会保留。
+
+每份成品独立编号和缓存。缓存包含模式、端点、提示词、实际生成参数、画风内容、
+有帧回调的插件及输入超分指纹；只更改流式预览或输出超分可复用缓存。
+失败或取消保留已保存的成品和最终图缓存，局部预览不作为缓存或成品。
+可使用局部重绘继续修正输出。独立分支 `plugin-prompt-draw` 仅包含本插件代码、
+ABI 头文件、构建脚本、README 和 GitHub Actions，不包含宿主实现。
+
+CLI 示例（styles 可省略，密钥从环境变量读取）：
+
+```json
+{
+  "mode": "generate",
+  "instruction": "绘制一张开心挥手的 Q 版人物表情，白色背景，简洁构图",
+  "styles": ["D:/references/style.png"],
+  "output": "D:/images/drawing.png",
+  "plugins": ["memestudio.prompt-draw"],
+  "base_url": "https://your-provider.example/v1",
+  "model": "your-image-model",
+  "count": 2,
+  "stream": true,
+  "partial_images": 2
+}
+```
+
+CLI 需显式启用插件；不与 sources 队列或局部重绘模式组合。
+其他启用插件的提示词与最终图回调仍执行，context.mode 为 generate。
+本插件只有菜单命令，不自行修改提示词或像素。
 
 ## 局部重绘
 

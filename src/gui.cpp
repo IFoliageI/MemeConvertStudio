@@ -29,7 +29,7 @@ enum Id {
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
     GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
-    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal
+    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry
 };
 struct State;
 struct View {
@@ -809,6 +809,21 @@ static void start(State& state, const Job* refinement = nullptr);
 static void updateRefineEntry(State& state) {
     EnableWindow(GetDlgItem(state.window, RefineEntry), !state.busy &&
         std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.local-redraw") != state.enabledPlugins.end());
+    EnableWindow(GetDlgItem(state.window, DrawingEntry), !state.busy &&
+        std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.prompt-draw") != state.enabledPlugins.end());
+}
+static Job drawingOptions(State& state) {
+    Job job; job.generate = true;
+    job.instruction = state.text(state.instruction); job.styles = state.stylePaths;
+    PWSTR pictures{};
+    fs::path directory;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &pictures))) {
+        directory = pictures; CoTaskMemFree(pictures);
+    } else directory = fs::current_path();
+    job.output = directory / L"MemeStudio-drawing.png";
+    for (int i = 2; fs::exists(job.output); ++i)
+        job.output = directory / (L"MemeStudio-drawing-" + std::to_wstring(i) + L".png");
+    return job;
 }
 static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
     state.plugins.reset();
@@ -953,6 +968,15 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
                 {"result", utf8(state.resultPath.wstring())},
                 {"output", utf8(state.text(state.output))}, {"instruction", utf8(state.text(state.instruction))}};
             auto result = state.plugins->command(info.id, info.commands.at(commandIndex).id, context, window);
+            if (result.value("action", "") == "prompt_draw") {
+                if (std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.prompt-draw") ==
+                    state.enabledPlugins.end()) throw Error("请先启用无图绘制插件");
+                auto job = drawingOptions(state);
+                if (editDrawing(state.instance, window, job)) {
+                    dialog->refinement = std::move(job); EndDialog(window, IDOK);
+                }
+                return TRUE;
+            }
             if (result.value("action", "") == "refine") {
                 Job job; job.source = state.resultPath;
                 if (editRefinement(state.instance, window, job, false)) {
@@ -1047,7 +1071,8 @@ static void start(State& state, const Job* refinement) {
     job.source = state.source; job.character = state.character; job.styles = state.stylePaths;
     job.crop = state.crop; job.instruction = state.text(state.instruction);
     job.output = state.text(state.output);
-    job.stride = state.number(Stride, 1, 600); job.maxFrames = state.number(MaxFrames, 0, 600);
+    job.stride = refinement ? 1 : state.number(Stride, 1, 600);
+    job.maxFrames = refinement ? 0 : state.number(MaxFrames, 0, 600);
     job.consistency = state.checked(Consistency); job.preserveText = state.checked(PreserveText);
     job.resume = state.checked(Resume);
     job.generationCount = state.number(GenerationCount, 1, 10);
@@ -1055,7 +1080,7 @@ static void start(State& state, const Job* refinement) {
     if (std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.waifu2x") != state.enabledPlugins.end())
         job.upscale = state.upscale;
     if (refinement) {
-        job.refine = true; job.region = refinement->region;
+        job.refine = refinement->refine; job.generate = refinement->generate; job.region = refinement->region;
         job.source = refinement->source; job.character.clear(); job.crop = {};
         job.styles = refinement->styles; job.instruction = refinement->instruction;
         job.output = refinement->output; job.stride = 1; job.maxFrames = 0;
@@ -1084,8 +1109,11 @@ static void start(State& state, const Job* refinement) {
     if (!job.provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
     if (job.provider.key.empty()) throw Error("请填写供应商 API Key");
     // Validate request shape before starting work or asking to replace an output.
-    multipart(job.provider, "", {{"validate", Bytes{1}}});
-    editUrl(job.provider.baseUrl);
+    if (job.generate && job.styles.empty()) {
+        generationBody(job.provider, utf8(job.instruction)); generationUrl(job.provider.baseUrl);
+    } else {
+        multipart(job.provider, "", {{"validate", Bytes{1}}}); editUrl(job.provider.baseUrl);
+    }
     bool batch = !refinement && state.batchEnabled() && state.sources.size() > 1;
     if (job.output.empty()) {
         auto path = batch ? chooseFolder(state, L"选择批量转换输出文件夹") : chooseOutput(state);
@@ -1116,7 +1144,8 @@ static void start(State& state, const Job* refinement) {
     EnableWindow(GetDlgItem(state.window, CancelJob), TRUE);
     state.set(state.status, L"正在准备任务…");
     state.previewImage.reset(); state.showingResult = true;
-    state.logLine((job.refine ? L"局部重绘开始，模型：" : L"任务开始，模型：") + wide(job.provider.model));
+    state.logLine((job.generate ? L"无图绘制开始，模型：" :
+        job.refine ? L"局部重绘开始，模型：" : L"任务开始，模型：") + wide(job.provider.model));
     SendMessageW(state.progress, PBM_SETPOS, 0, 0);
     if (state.worker.joinable()) state.worker.join();
     state.worker = std::thread([&state, job, batch, jobs, sources] {
@@ -1217,6 +1246,7 @@ static void initialize(State& state) {
         Instruction, 16, 686, 242, 100, true);
     button(SourceTab, L"原图", 0, 0, 82, false); button(ResultTab, L"结果", 0, 0, 82, false);
     button(RefineEntry, L"局部重绘…", 380, 15, 120);
+    button(DrawingEntry, L"无图绘制…", 510, 15, 120);
     state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
         WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
     ShowWindow(state.resultChoice, SW_HIDE);
@@ -1274,6 +1304,15 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == DrawingEntry && !state.busy) {
+        if (!state.plugins) return;
+        auto action = state.plugins->command("memestudio.prompt-draw", "draw", Json::object(), state.window);
+        if (action.value("action", "") == "prompt_draw") {
+            auto job = drawingOptions(state);
+            if (editDrawing(state.instance, state.window, job)) start(state, &job);
+        }
+        return;
+    }
     if (id == SourcePosition) {
         if (!state.changingSourcePosition && notification == EN_KILLFOCUS && !state.busy)
             commitSourcePosition(state);
@@ -1624,6 +1663,17 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             throw Error("Upscale dialog configuration failed");
         applyPlugins(state, {});
         report["upscale_plugin"] = "passed";
+        applyPlugins(state, {"memestudio.prompt-draw"});
+        auto drawingAction = state.plugins->command("memestudio.prompt-draw", "draw", Json::object(), window);
+        if (drawingAction.value("action", "") != "prompt_draw" ||
+            !IsWindowEnabled(GetDlgItem(window, DrawingEntry))) throw Error("Drawing plugin entry failed");
+        Job drawing; drawing.output = demo / L"drawing.png";
+        if (!editDrawing(instance, window, drawing, true) || !drawing.generate || drawing.refine ||
+            !drawing.source.empty() || !drawing.character.empty() || drawing.instruction.empty() || drawing.styles.size() != 1)
+            throw Error("Drawing dialog configuration failed");
+        applyPlugins(state, {});
+        if (IsWindowEnabled(GetDlgItem(window, DrawingEntry))) throw Error("Disabled drawing entry is active");
+        report["drawing_plugin"] = "passed";
         applyPlugins(state, {"memestudio.batch-convert"});
         auto batchAction = state.plugins->command("memestudio.batch-convert", "import-files", Json::object(), window);
         if (batchAction.value("action", "") != "batch_import") throw Error("Batch plugin command failed");

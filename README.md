@@ -1,6 +1,6 @@
 # MemeConvertStudio
 
-MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具。它通过可配置供应商的 OpenAI 兼容图像编辑接口，将原表情主体替换为截图或立绘中的人物，并保留原动作、构图和背景；也可添加画风参考、组合中文提示预设、逐帧处理 GIF，或通过插件进行局部重绘与可选超分。
+MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具。它通过可配置供应商的 OpenAI 兼容图像接口，将原表情主体替换为截图或立绘中的人物，并保留原动作、构图和背景；也可添加画风参考、组合中文提示预设、逐帧处理 GIF，或通过插件进行无图绘制、局部重绘与可选超分。
 
 ## 启动
 
@@ -12,14 +12,15 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
 
-完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有四个精简插件分支；它们不包含应用宿主源码或其他插件：
+完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有五个精简插件分支；它们不包含应用宿主源码或其他插件：
 
 - [`plugin-example`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-example)：示例提示词插件。
 - [`plugin-local-redraw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-local-redraw)：局部重绘命令插件。
 - [`plugin-waifu2x`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-waifu2x)：Waifu2x 输入/输出超分命令插件。
 - [`plugin-batch-convert`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-batch-convert)：多源图片和 GIF 批量转换插件。
+- [`plugin-prompt-draw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-prompt-draw)：纯提示词及可选画风参考的无图绘制插件。
 
-每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1` 和专属 README。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分与批量转换插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
+每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1`、专属 README 和自动编译工作流。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分、批量转换与无图绘制插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -47,6 +48,33 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 预设是发送给图像模型的提示要求，实际效果取决于模型。
 
 ## 批量生成与插件
+
+### 无图绘制
+
+在“插件管理”勾选“无图绘制”并应用，然后点击主窗口顶部“无图绘制…”；
+也可在插件管理执行“通过提示词绘制…”。无需导入原始表情或人物图。
+
+在独立窗口填写绘制提示词，按需添加最多 8 张画风参考。参考支持多选或拖入，
+可移除、点击列表预览；GIF 参考只取第一帧。窗口初始带入主界面的附加要求和画风图，
+本轮修改在绘制窗口内使用，取消不会发起请求。默认保存到系统“图片”目录，
+可选择其他 `.png` 路径。
+
+不添加参考时使用 `POST /images/generations` JSON 请求，仅发送提示词和生成参数。
+添加参考时改用 `POST /images/edits` 多图编辑，仅上传画风参考，提示模型以文本确定
+主体、姿势和构图，以参考图提供线条、配色、材质和渲染风格；没有隐藏源图或空白占位图。
+画风提示是模型指令，最终风格效果取决于供应商。对应端点不受支持时直接报错，
+不会自动重试付费请求或切换接口。
+
+复用当前供应商、模型、Quality、Complexity、Format、Compression、尺寸、
+流式预览和生成张数（1–10）。每张独立串行生成，保持供应商实际返回尺寸，
+本地统一保存 PNG；Format/Compression 仍控制网络返回格式。
+复用已完成图像缓存，关闭“复用已完成帧”可重新绘制。
+已启用 Waifu2x 时，输入超分仅处理画风参考，输出超分处理成品；
+纯文本模式没有输入图，不运行输入超分。
+
+成品进入主窗口结果列表，可打开、预览，或使用“局部重绘”继续修正。
+不生成动画 GIF；原表情的抽帧、保留文字、人物裁剪和时序一致性设置不参与绘制。
+命令行 `mode=generate` 的示例见 [PLUGINS.md](PLUGINS.md)。
 
 ### 多源素材批量转换
 
@@ -102,7 +130,8 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 
 ## 供应商兼容
 
-使用 `POST /images/edits` 的 `multipart/form-data` 多图编辑协议，采用 `Authorization: Bearer <key>` 认证。
+人物替换和带参考图的绘制使用 `POST /images/edits` 的 `multipart/form-data` 多图编辑协议，
+纯提示词绘制使用 `POST /images/generations` 的 JSON 协议，均采用 `Authorization: Bearer <key>` 认证。
 
 - Base URL 输入 `https://your-provider.example/v1`，程序会补上 `/images/edits`；也可以填写完整编辑接口地址。
 - 图片按顺序上传：原始表情帧、人物参考、画风参考、前后已重绘帧，最后可附加首张生成帧作为一致性参考。提示词逐一标明参考图对应的帧号与前后关系。
@@ -200,7 +229,7 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 其中包含完整应用包 `MemeStudio-Windows-x64.zip` 和插件包 `MemeStudio-Plugins.zip`。
 构建产物保存 14 天。同一分支新提交会取消旧构建。
 
-四个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
+五个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
 只构建该分支对应插件。下载其 `MemeStudio-Plugin-Windows-x64`，
 将解压后的 `plugins` 目录放到兼容的主程序旁。工作流不创建 GitHub Release。
 
@@ -220,7 +249,12 @@ node .\tests\integration.mjs
 
 集成测试覆盖多图上传、静态 PNG、GIF 时序、返回 URL、缓存续作、参数失效、取消及错误信息密钥隐藏。测试文件输出到 `tmp`。
 
-只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-source-batch.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-source-batch.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-source-batch.exe`。
+只构建可运行 `.\build.ps1`，不会启动测试。程序正在使用、无法覆盖 EXE 时，可运行 `.\build.ps1 -ExecutableName MemeStudio-drawing.exe`，再用 `.\package.ps1 -Executable .\bin\MemeStudio-drawing.exe` 打包；压缩包内仍命名为 `bin\MemeStudio.exe`。本次新版单独构建为 `bin\MemeStudio-drawing.exe`。
+
+无图绘制定向检查：`node tests/drawing.mjs`，仅用本机模拟接口检查纯文本 JSON、
+画风参考上传、流式预览、返回尺寸、多张输出、缓存恢复、输入校验和原编辑路径。
+`node tests/batch.mjs --exe=D:\Projects\MemeStudio\bin\MemeStudio-drawing.exe --ui-only`
+检查插件入口和绘制窗口，并生成 `tmp/tests/ui-drawing.png`。
 
 多源转换定向检查：`node tests/source-batch.mjs`，仅用本机模拟供应商验证混合图片/GIF 队列、
 导入去重、编号输出、副本、累计进度、失败恢复与跨源图覆盖拦截。

@@ -278,6 +278,7 @@ static void runSingleJob(const Job& job, Cancel& cancel, const Reporter& report,
 }
 void runJob(const Job& job, Cancel& cancel, const Reporter& report) {
     cancel.verify();
+    if (job.generate) { runDrawing(job, cancel, report); return; }
     if (job.refine) {
         validateRegion(job.region);
         if (job.instruction.find_first_not_of(L" \t\r\n") == std::wstring::npos)
