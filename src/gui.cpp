@@ -22,6 +22,7 @@ namespace studio {
 namespace {
 constexpr UINT WM_PROGRESS = WM_APP + 1, WM_FINISHED = WM_APP + 2;
 constexpr int settingsHeight = 1210;
+constexpr int minimumLeftWidth = 242, minimumRightWidth = 332, minimumCanvasWidth = 400;
 constexpr COLORREF ink = RGB(34, 39, 43), muted = RGB(104, 113, 120);
 constexpr COLORREF paper = RGB(245, 247, 248), line = RGB(218, 224, 227);
 enum Id {
@@ -51,11 +52,21 @@ struct Completion {
     std::vector<std::string> models;
     std::vector<fs::path> outputs;
 };
+struct PaneControl {
+    HWND window{};
+    RECT bounds{};
+    bool stretch = false, alignRight = false;
+};
 struct State {
     HINSTANCE instance{};
     HWND window{}, settings{}, sourceView{}, characterView{}, mainView{}, styles{},
         log{}, progress{}, status{}, estimate{}, timeline{}, instruction{}, output{},
         sourcePath{}, characterPath{}, cropInfo{}, frameInfo{}, resultChoice{};
+    HWND leftSplitter{}, rightSplitter{};
+    std::vector<PaneControl> leftControls, settingsControls;
+    int leftWidth = minimumLeftWidth, rightWidth = minimumRightWidth;
+    int actualLeftWidth = minimumLeftWidth, actualRightWidth = minimumRightWidth;
+    int settingsBaseWidth = 0, draggingSplitter = 0, splitterOffset = 0;
     HFONT font{}, titleFont{}, smallFont{};
     HBRUSH background = CreateSolidBrush(paper), white = CreateSolidBrush(RGB(255, 255, 255));
     std::vector<HWND> lockControls;
@@ -159,6 +170,90 @@ struct State {
         } catch (...) { set(estimate, L"请检查抽帧参数"); }
     }
 };
+static void layout(State& state);
+static void rememberPaneControls(HWND parent, std::vector<PaneControl>& controls, bool left) {
+    for (auto child = GetWindow(parent, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+        RECT bounds{}; GetWindowRect(child, &bounds);
+        MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&bounds), 2);
+        if (left && (bounds.top < 60 || bounds.left < 16 || bounds.right > 258)) continue;
+        int id = GetDlgCtrlID(child), width = bounds.right - bounds.left;
+        bool stretch = left ? width >= 150 : width >= 280 || id == Model || id == GenerationCount;
+        bool alignRight = !stretch && bounds.left > 16 && id != SourcePosition && id != SourceTotal;
+        wchar_t type[32]{}; GetClassNameW(child, type, 32);
+        if (wcscmp(type, L"ComboBox") == 0) bounds.bottom = bounds.top + 200;
+        controls.push_back({child, bounds, stretch, alignRight});
+    }
+}
+static void resizeSettingsControls(State& state, int width) {
+    if (!state.settingsBaseWidth) return;
+    int delta = width - state.settingsBaseWidth;
+    for (const auto& control : state.settingsControls) {
+        auto bounds = control.bounds;
+        int id = GetDlgCtrlID(control.window);
+        if (id == Stride) bounds.right += delta / 2;
+        else if (id == MaxFrames) {
+            bounds.left += delta / 2;
+            bounds.right += delta;
+        } else if (control.stretch) bounds.right += delta;
+        else if (control.alignRight) { bounds.left += delta; bounds.right += delta; }
+        MoveWindow(control.window, bounds.left, bounds.top - state.scroll,
+            bounds.right - bounds.left, bounds.bottom - bounds.top, TRUE);
+    }
+}
+static LRESULT CALLBACK splitterProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<State*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        state = static_cast<State*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (!state) return DefWindowProcW(window, message, wparam, lparam);
+    switch (message) {
+    case WM_SETCURSOR: SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE;
+    case WM_LBUTTONDOWN:
+        state->draggingSplitter = window == state->leftSplitter ? 1 : 2;
+        state->splitterOffset = GET_X_LPARAM(lparam);
+        SetCapture(window); return 0;
+    case WM_MOUSEMOVE:
+        if (GetCapture() == window && state->draggingSplitter) {
+            POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            MapWindowPoints(window, state->window, &point, 1);
+            RECT client{}; GetClientRect(state->window, &client);
+            int budget = std::max(minimumLeftWidth + minimumRightWidth,
+                int(client.right) - 84 - minimumCanvasWidth);
+            if (state->draggingSplitter == 1)
+                state->leftWidth = std::clamp(int(point.x) - state->splitterOffset - 24,
+                    minimumLeftWidth, budget - state->actualRightWidth);
+            else state->rightWidth = std::clamp(int(client.right - point.x) + state->splitterOffset - 30,
+                minimumRightWidth, budget - state->actualLeftWidth);
+            layout(*state);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (GetCapture() == window) ReleaseCapture();
+        return 0;
+    case WM_CANCELMODE:
+        if (GetCapture() == window) ReleaseCapture();
+        return 0;
+    case WM_CAPTURECHANGED: state->draggingSplitter = 0; InvalidateRect(window, nullptr, FALSE); return 0;
+    case WM_LBUTTONDBLCLK:
+        if (window == state->leftSplitter) state->leftWidth = minimumLeftWidth;
+        else state->rightWidth = minimumRightWidth;
+        layout(*state); return 0;
+    case WM_PRINTCLIENT:
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        auto dc = message == WM_PAINT ? BeginPaint(window, &paint) : reinterpret_cast<HDC>(wparam);
+        RECT rect{}; GetClientRect(window, &rect);
+        FillRect(dc, &rect, state->background);
+        rect.left = 3; rect.right = 5;
+        auto brush = CreateSolidBrush(GetCapture() == window ? muted : line);
+        FillRect(dc, &rect, brush); DeleteObject(brush);
+        if (message == WM_PAINT) EndPaint(window, &paint);
+        return 0;
+    }
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
 static LRESULT CALLBACK settingsWheel(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
     UINT_PTR, DWORD_PTR parent) {
     if (message == WM_MOUSEWHEEL) {
@@ -581,6 +676,8 @@ static LRESULT CALLBACK settingsProcedure(HWND window, UINT message, WPARAM wpar
         ScrollWindowEx(window, 0, state->scroll - next, nullptr, nullptr, nullptr, nullptr,
             SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
         state->scroll = next;
+        GetClientRect(window, &rect);
+        resizeSettingsControls(*state, rect.right);
     }
     if (message == WM_VSCROLL || message == WM_MOUSEWHEEL) {
         SCROLLINFO info{sizeof(SCROLLINFO), SIF_ALL}; GetScrollInfo(window, SB_VERT, &info);
@@ -699,6 +796,7 @@ static void saveSettings(State& state) {
     data["enabled_plugins"] = state.enabledPlugins;
     data["upscale"] = upscaleJson(state.upscale);
     data["api_routing"] = routingJson(state.routing, true);
+    data["sidebar_widths"] = {{"left", state.leftWidth}, {"right", state.rightWidth}};
     writeJson(settingsPath(), data);
 }
 static void loadSettings(State& state) {
@@ -706,6 +804,11 @@ static void loadSettings(State& state) {
     try {
         if (!fs::exists(settingsPath())) return;
         Json data = readJson(settingsPath());
+        if (data.contains("sidebar_widths") && data["sidebar_widths"].is_object()) {
+            const auto& panes = data["sidebar_widths"];
+            state.leftWidth = std::clamp(panes.value("left", minimumLeftWidth), minimumLeftWidth, 1200);
+            state.rightWidth = std::clamp(panes.value("right", minimumRightWidth), minimumRightWidth, 1200);
+        }
         for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
             Complexity, OutputFormat, Compression, PartialImages, GenerationCount}) {
             if (!data.contains(std::to_string(id))) continue;
@@ -731,7 +834,7 @@ static void updateSourceControls(State& state) {
     bool enabled = state.batchEnabled();
     for (int id : {SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal})
         ShowWindow(GetDlgItem(state.window, id), enabled ? SW_SHOW : SW_HIDE);
-    MoveWindow(state.sourceView, 16, 134, 242, enabled ? 90 : 126, TRUE);
+    MoveWindow(state.sourceView, 16, 134, state.actualLeftWidth, enabled ? 90 : 126, TRUE);
     state.changingSourcePosition = true;
     state.set(GetDlgItem(state.window, SourcePosition),
         state.sources.empty() ? L"0" : std::to_wstring(state.sourceIndex + 1));
@@ -822,7 +925,7 @@ static void dropFiles(State& state, HDROP drop, int kind) {
         if (state.busy) throw Error("任务进行中，请在结束后拖入图片");
         if (kind == -1) {
             POINT point{}; DragQueryPoint(drop, &point);
-            if (point.x < 16 || point.x > 258) return;
+            if (point.x < 16 || point.x > state.actualLeftWidth + 16) return;
             kind = point.y >= 66 && point.y <= 260 ? 0 :
                 point.y >= 274 && point.y <= 500 ? 1 : -1;
         }
@@ -1318,9 +1421,25 @@ static void configureRouting(State& state) {
 }
 static void layout(State& state) {
     RECT rect; GetClientRect(state.window, &rect);
-    int width = rect.right, height = rect.bottom, left = 258, right = 332;
+    int width = rect.right, height = rect.bottom;
+    int budget = std::max(minimumLeftWidth + minimumRightWidth, width - 84 - minimumCanvasWidth);
+    int left = std::clamp(state.leftWidth, minimumLeftWidth, budget - minimumRightWidth);
+    int right = std::clamp(state.rightWidth, minimumRightWidth, budget - left);
+    state.actualLeftWidth = left; state.actualRightWidth = right;
+    for (const auto& control : state.leftControls) {
+        auto bounds = control.bounds;
+        int delta = left - minimumLeftWidth;
+        if (control.stretch) bounds.right += delta;
+        else if (control.alignRight) { bounds.left += delta; bounds.right += delta; }
+        if (control.window == state.sourceView) bounds.bottom = bounds.top + (state.batchEnabled() ? 90 : 126);
+        if (control.window == state.instruction) bounds.bottom = bounds.top + std::max(54, height - 706);
+        MoveWindow(control.window, bounds.left, bounds.top, bounds.right - bounds.left,
+            bounds.bottom - bounds.top, TRUE);
+    }
     MoveWindow(state.settings, width - right - 14, 60, right, height - 78, TRUE);
-    int middleX = left + 30, middleWidth = width - middleX - right - 38;
+    MoveWindow(state.leftSplitter, left + 24, 60, 8, height - 78, TRUE);
+    MoveWindow(state.rightSplitter, width - right - 30, 60, 8, height - 78, TRUE);
+    int middleX = left + 46, middleWidth = width - middleX - right - 38;
     MoveWindow(GetDlgItem(state.window, SourceTab), middleX, 68, 82, 30, TRUE);
     MoveWindow(GetDlgItem(state.window, ResultTab), middleX + 90, 68, 82, 30, TRUE);
     MoveWindow(state.resultChoice, middleX + 180, 68, std::max(64, middleWidth - 336), 200, TRUE);
@@ -1339,7 +1458,6 @@ static void layout(State& state) {
     MoveWindow(state.status, middleX, height - 62, middleWidth - 200, 42, TRUE);
     MoveWindow(GetDlgItem(state.window, Generate), middleX + middleWidth - 188, height - 60, 112, 34, TRUE);
     MoveWindow(GetDlgItem(state.window, CancelJob), middleX + middleWidth - 68, height - 60, 68, 34, TRUE);
-    MoveWindow(state.instruction, 16, 686, 242, std::max(54, height - 706), TRUE);
     InvalidateRect(state.window, nullptr, TRUE);
 }
 static void initialize(State& state) {
@@ -1419,7 +1537,17 @@ static void initialize(State& state) {
     EnableWindow(GetDlgItem(state.window, CancelJob), FALSE);
     state.settings = CreateWindowExW(WS_EX_CONTROLPARENT, L"MemeStudioSettings", L"供应商和生成参数",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL, 850, 60, 332, 760, state.window, nullptr, state.instance, &state);
-    createSettings(state); loadSettings(state); updateProviderControls(state);
+    rememberPaneControls(state.window, state.leftControls, true);
+    createSettings(state);
+    rememberPaneControls(state.settings, state.settingsControls, false);
+    // Original settings coordinates end at x=308; keep an 8px inner margin,
+    // regardless of the system scrollbar width or display scaling.
+    state.settingsBaseWidth = 316;
+    state.leftSplitter = CreateWindowExW(0, L"MemeStudioSplitter", L"调整素材栏宽度", WS_CHILD | WS_VISIBLE,
+        266, 60, 8, 760, state.window, nullptr, state.instance, &state);
+    state.rightSplitter = CreateWindowExW(0, L"MemeStudioSplitter", L"调整参数栏宽度", WS_CHILD | WS_VISIBLE,
+        834, 60, 8, 760, state.window, nullptr, state.instance, &state);
+    loadSettings(state); updateProviderControls(state);
     auto enabled = std::move(state.enabledPlugins);
     state.enabledPlugins.clear();
     updatePluginEntries(state); updateSourceControls(state);
@@ -1437,6 +1565,8 @@ static void initialize(State& state) {
         SendMessageW(tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
     };
     tip(state.characterView, L"拖动框选人物区域");
+    tip(state.leftSplitter, L"拖动调整素材栏宽度；双击恢复默认");
+    tip(state.rightSplitter, L"拖动调整参数栏宽度；双击恢复默认");
     tip(GetDlgItem(state.window, BrowseOutput), L"选择输出位置；多源批量转换时选择文件夹");
     tip(GetDlgItem(state.window, SourcePrevious), L"上一份源素材");
     tip(GetDlgItem(state.window, SourceNext), L"下一份源素材");
@@ -1559,7 +1689,7 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
             info->ptMinTrackSize = {1120, 830}; return 0;
         }
-        case WM_SIZE: if (state->settings) layout(*state); return 0;
+        case WM_SIZE: if (state->settings && wparam != SIZE_MINIMIZED) layout(*state); return 0;
         case WM_COMMAND: command(*state, LOWORD(wparam), HIWORD(wparam)); return 0;
         case WM_DROPFILES: dropFiles(*state, reinterpret_cast<HDROP>(wparam), -1); return 0;
         case WM_HSCROLL:
@@ -1688,6 +1818,9 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
     RegisterClassExW(&type);
     type.lpszClassName = L"MemeStudioSettings"; type.lpfnWndProc = settingsProcedure;
     RegisterClassExW(&type);
+    type.lpszClassName = L"MemeStudioSplitter"; type.lpfnWndProc = splitterProcedure;
+    type.hCursor = LoadCursorW(nullptr, IDC_SIZEWE);
+    RegisterClassExW(&type);
     HWND window = CreateWindowExW(0, L"MemeStudio", L"表情重绘 · Meme Studio", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 900, nullptr, nullptr, instance, &state);
     if (!window) throw Error("Cannot create application window");
@@ -1730,6 +1863,64 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             report["snapshots"].push_back({{"width", width}, {"height", height}, {"file", utf8(filename)}});
         };
         snapshot(1280, 900, L"ui-wide.png");
+        snapshot(1120, 830, L"ui-compact.png");
+        auto clientBounds = [&](HWND control, HWND parent) {
+            RECT bounds{}; GetWindowRect(control, &bounds);
+            MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&bounds), 2);
+            return bounds;
+        };
+        auto dragSplitter = [&](HWND splitter, int movement) {
+            SendMessageW(splitter, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(4, 20));
+            if (GetCapture() != splitter) throw Error("Splitter did not capture the mouse");
+            SendMessageW(splitter, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(4 + movement, 20));
+            SendMessageW(splitter, WM_LBUTTONUP, 0, MAKELPARAM(4, 20));
+            if (GetCapture() || state.draggingSplitter) throw Error("Splitter did not release the mouse");
+        };
+        snapshot(1440, 900, L"ui-sidebar-start.png");
+        dragSplitter(state.leftSplitter, 90);
+        dragSplitter(state.rightSplitter, -90);
+        auto sourceBounds = clientBounds(state.sourceView, window);
+        auto canvasBounds = clientBounds(state.mainView, window);
+        auto urlBounds = clientBounds(state.get(BaseUrl), state.settings);
+        RECT settingsBounds{}; GetClientRect(state.settings, &settingsBounds);
+        if (state.actualLeftWidth != 332 || state.actualRightWidth != 422 ||
+            sourceBounds.right - sourceBounds.left != 332 ||
+            canvasBounds.left != sourceBounds.right + 30 || urlBounds.right != settingsBounds.right - 8)
+            throw Error("Sidebar controls did not follow the splitters");
+        SendMessageW(state.settings, WM_VSCROLL, SB_BOTTOM, 0);
+        dragSplitter(state.rightSplitter, -20);
+        auto pluginBounds = clientBounds(state.get(PluginManage), state.settings);
+        GetClientRect(state.settings, &settingsBounds);
+        if (pluginBounds.top != 1132 - state.scroll || pluginBounds.bottom > settingsBounds.bottom ||
+            pluginBounds.right > settingsBounds.right)
+            throw Error("Resizing a scrolled sidebar displaced its controls: top=" + std::to_string(pluginBounds.top) +
+                " scroll=" + std::to_string(state.scroll) + " bottom=" + std::to_string(pluginBounds.bottom) +
+                " right=" + std::to_string(pluginBounds.right) + " client=" +
+                std::to_string(settingsBounds.right) + "x" + std::to_string(settingsBounds.bottom));
+        SendMessageW(state.settings, WM_VSCROLL, SB_TOP, 0);
+        snapshot(1440, 900, L"ui-resizable-sidebars.png");
+        snapshot(1120, 830, L"ui-sidebars-compact.png");
+        canvasBounds = clientBounds(state.mainView, window);
+        if (canvasBounds.right - canvasBounds.left < minimumCanvasWidth ||
+            state.actualLeftWidth < minimumLeftWidth || state.actualRightWidth < minimumRightWidth)
+            throw Error("Window resize violated sidebar minimum widths");
+        dragSplitter(state.leftSplitter, -3000);
+        dragSplitter(state.rightSplitter, 3000);
+        if (state.actualLeftWidth != minimumLeftWidth || state.actualRightWidth != minimumRightWidth)
+            throw Error("Sidebar dragging exceeded minimum width");
+        dragSplitter(state.leftSplitter, 3000);
+        dragSplitter(state.rightSplitter, -3000);
+        canvasBounds = clientBounds(state.mainView, window);
+        if (canvasBounds.right - canvasBounds.left < minimumCanvasWidth)
+            throw Error("Sidebar dragging squeezed the canvas below its minimum");
+        SendMessageW(state.leftSplitter, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(4, 20));
+        SendMessageW(state.leftSplitter, WM_CANCELMODE, 0, 0);
+        if (GetCapture() || state.draggingSplitter) throw Error("Cancelled splitter drag retained capture");
+        SendMessageW(state.leftSplitter, WM_LBUTTONDBLCLK, 0, 0);
+        SendMessageW(state.rightSplitter, WM_LBUTTONDBLCLK, 0, 0);
+        if (state.leftWidth != minimumLeftWidth || state.rightWidth != minimumRightWidth)
+            throw Error("Splitter double click did not restore defaults");
+        report["resizable_sidebars"] = "passed (drag, child layout, scroll, minimum widths, capture cancellation, reset)";
         snapshot(1120, 830, L"ui-compact.png");
         auto originalInstruction = state.text(state.instruction);
         choosePreset(state, IDOK, [&](HWND dialog) {
