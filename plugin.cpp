@@ -2,10 +2,10 @@
 #include <cstring>
 namespace {
 const char* MEMESTUDIO_CALL command(const char* id, const char*, void*) {
-    return std::strcmp(id, "test-parameters") == 0 ? "{\"action\":\"api_parameter_test\"}" : nullptr;
+    return std::strcmp(id, "configure-routing") == 0 ? "{\"action\":\"api_routing\"}" : nullptr;
 }
 const MemeStudioPluginV1 plugin{
-    sizeof(MemeStudioPluginV1), MEMESTUDIO_PLUGIN_ABI, "memestudio.api-parameter-test",
+    sizeof(MemeStudioPluginV1), MEMESTUDIO_PLUGIN_ABI, "memestudio.api-load-balancing",
     nullptr, nullptr, nullptr, command, nullptr
 };
 }

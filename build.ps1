@@ -6,13 +6,13 @@ $installation = & $vswhere -latest -prerelease -products * `
 if (!$installation) { throw "Visual Studio C++ x64 toolchain not found." }
 
 $build = Join-Path $PSScriptRoot "build"
-$output = Join-Path $PSScriptRoot "dist\plugins\api-parameter-test"
+$output = Join-Path $PSScriptRoot "dist\plugins\api-load-balancing"
 New-Item -ItemType Directory -Force -Path $build,$output | Out-Null
 $compiler = Join-Path $installation "VC\Auxiliary\Build\vcvars64.bat"
 $command = 'call "' + $compiler + '" >nul && cl /nologo /std:c++20 /O2 /EHsc /utf-8 /W4 /MT /LD "' +
     (Join-Path $PSScriptRoot "plugin.cpp") + '" /Fo:"' + (Join-Path $build "plugin.obj") +
-    '" /Fe:"' + (Join-Path $output "api-parameter-test.dll") + '" /link /IMPLIB:"' +
-    (Join-Path $build "api-parameter-test.lib") + '"'
+    '" /Fe:"' + (Join-Path $output "api-load-balancing.dll") + '" /link /IMPLIB:"' +
+    (Join-Path $build "api-load-balancing.lib") + '"'
 & $env:ComSpec /d /s /c $command
 if ($LASTEXITCODE -ne 0) { throw "Plugin build failed." }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "plugin.json") -Destination $output -Force
