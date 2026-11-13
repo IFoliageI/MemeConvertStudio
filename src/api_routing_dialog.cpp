@@ -105,7 +105,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         if (message == WM_INITDIALOG) {
             dialog = reinterpret_cast<Dialog*>(lparam); dialog->window = window;
             SetWindowLongPtrW(window, DWLP_USER, reinterpret_cast<LONG_PTR>(dialog));
-            SetWindowTextW(window, L"API 负载均衡与灾备");
+            SetWindowTextW(window, L"API 负载均衡与灾备 · 聚合网关 / 供应商池");
             RECT rect{0, 0, 960, 730};
             AdjustWindowRectEx(&rect, DWORD(GetWindowLongW(window, GWL_STYLE)), FALSE, DWORD(GetWindowLongW(window, GWL_EXSTYLE)));
             RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
@@ -122,14 +122,14 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             auto tick = [&](int id, const wchar_t* label, int x, int y, int w, bool value) {
                 add(L"BUTTON", label, WS_TABSTOP | BS_AUTOCHECKBOX, id, x, y, w, 26); checkBox(window, id, value);
             };
-            tick(Enabled, L"生成任务启用路由", 16, 12, 190, dialog->options.enabled);
+            tick(Enabled, L"启用聚合网关", 16, 12, 190, dialog->options.enabled);
             tick(Spending, L"按估算花销比例", 220, 12, 188, dialog->options.spending);
             tick(Failover, L"启用灾备切换", 430, 12, 170, dialog->options.failover);
             tick(Remember, L"本机加密记住 Keys", 670, 12, 274, dialog->options.remember);
             dialog->list = add(WC_LISTVIEWW, L"", WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                 Channels, 16, 50, 928, 206);
             ListView_SetExtendedListViewStyle(dialog->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-            const wchar_t* titles[]{L"渠道 / Key 别名", L"状态", L"API 地址", L"模型", L"权重", L"优先级", L"估算单价", L"对比"};
+            const wchar_t* titles[]{L"供应商池 / Key", L"状态", L"API 地址", L"模型", L"权重", L"优先级", L"估算单价", L"对比"};
             const int widths[]{142, 56, 248, 145, 62, 64, 116, 66};
             for (int i = 0; i < 8; ++i) {
                 LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -160,7 +160,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             add(L"STATIC", L"限流冷却（秒）", 0, 0, 16, 454, 158, 24);
             add(L"EDIT", std::to_wstring(dialog->options.cooldownSeconds).c_str(), WS_TABSTOP | ES_NUMBER, Cooldown, 180, 450, 80, 28);
             tick(Service, L"遇 502 / 503 / 504 也切换（可能重复计费）", 284, 450, 660, dialog->options.serviceFailover);
-            add(L"STATIC", L"优先级越小越优先；同级按权重分流，默认按请求数。花销模式按 权重 ÷ 估算单价 分配请求。",
+            add(L"STATIC", L"请求 → 本机聚合网关 → 供应商池；同级按权重分流，优先级越小越优先。花销模式按 权重 ÷ 单价。",
                 0, 0, 16, 490, 928, 24);
             add(L"STATIC", L"连接未建立或 429 将冷却切换，401/403 停用；超时、流中断、图像下载失败等结果不明错误停止。",
                 0, 0, 16, 520, 928, 24);

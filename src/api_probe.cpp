@@ -2,8 +2,69 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <cctype>
 
 namespace studio {
+int estimateProbeTokens(const std::string& prompt) {
+    // This generic character heuristic is informative, not a provider tokenizer.
+    int tokens = 0, asciiRun = 0;
+    auto flushAscii = [&] {
+        if (asciiRun) tokens += (asciiRun + 3) / 4;
+        asciiRun = 0;
+    };
+    for (size_t i = 0; i < prompt.size();) {
+        unsigned char lead = static_cast<unsigned char>(prompt[i]);
+        if (lead < 0x80) {
+            if (std::isalnum(lead)) ++asciiRun;
+            else { flushAscii(); if (!std::isspace(lead)) ++tokens; }
+            ++i;
+            continue;
+        }
+        flushAscii();
+        int continuation = (lead & 0xF0) == 0xF0 ? 3 : (lead & 0xE0) == 0xE0 ? 2 : 1;
+        uint32_t codepoint = lead & (continuation == 3 ? 0x07 : continuation == 2 ? 0x0F : 0x1F);
+        if (i + continuation >= prompt.size()) { ++tokens; break; }
+        for (int j = 1; j <= continuation; ++j)
+            codepoint = (codepoint << 6) | (static_cast<unsigned char>(prompt[i + j]) & 0x3F);
+        tokens += codepoint >= 0x2E80 && codepoint <= 0x9FFF ? 1 : 2;
+        i += continuation + 1;
+    }
+    flushAscii();
+    return std::max(1, tokens);
+}
+Json estimateProbeUsage(const Provider& provider) {
+    static const std::string text = "Create a simple blue square on a white background. Return one image without text.";
+    Json result{{"text_input", estimateProbeTokens(text)}, {"image_input", nullptr}, {"output_min", nullptr},
+        {"output_max", nullptr}, {"partial_image_overhead", provider.stream ? 100 * provider.partialImages : 0},
+        {"estimated", true}};
+    // Keep this legacy profile narrow: aliases and newer models may bill differently.
+    if (provider.model != "gpt-image-1" && provider.model != "gpt-image-1.5" &&
+        provider.model != "gpt-image-1-mini") return result;
+    const int tokens[3][3]{{272, 408, 400}, {1056, 1584, 1568}, {4160, 6240, 6208}};
+    int q = provider.quality == "low" ? 0 : provider.quality == "medium" ? 1 : provider.quality == "high" ? 2 : -1;
+    if (!provider.quality.empty() && provider.quality != "auto" && q < 0) return result;
+    int s = provider.size == "1024x1024" ? 0 : provider.size == "1024x1536" ? 1 :
+        provider.size == "1536x1024" ? 2 : -1;
+    if (!provider.size.empty() && provider.size != "auto" && s < 0) return result;
+    int minimum = 100000, maximum = 0;
+    for (int row = 0; row < 3; ++row) for (int column = 0; column < 3; ++column)
+        if ((q < 0 || q == row) && (s < 0 || s == column)) {
+            minimum = std::min(minimum, tokens[row][column]); maximum = std::max(maximum, tokens[row][column]);
+        }
+    result["output_min"] = minimum; result["output_max"] = maximum;
+    result["profile"] = "legacy_gpt_image_standard_sizes";
+    return result;
+}
+std::wstring probeTokenLabel(const Provider& provider) {
+    auto usage = estimateProbeUsage(provider);
+    auto result = L"文本 ~" + std::to_wstring(usage["text_input"].get<int>()) + L"；输出 ";
+    if (usage["output_min"].is_null()) return result + L"待定";
+    result += std::to_wstring(usage["output_min"].get<int>());
+    if (usage["output_min"] != usage["output_max"]) result += L"–" + std::to_wstring(usage["output_max"].get<int>());
+    int partial = usage["partial_image_overhead"];
+    if (partial) result += L" + 局部图 ≤" + std::to_wstring(partial);
+    return result;
+}
 static Provider baselineProvider(const Provider& current) {
     Provider base;
     base.baseUrl = current.baseUrl; base.key = current.key; base.model = current.model;
@@ -140,13 +201,28 @@ Json runParameterProbe(const ProbeOptions& options, Cancel& cancel, const std::f
     Json report{{"version", 1}, {"model", options.provider.model}, {"provider_endpoint", utf8(endpoint)},
         {"created_at", utf8(timestamp)},
         {"endpoint", options.generation ? "/images/generations" : "/images/edits"},
+        {"estimated_prompt_text_tokens_per_request", estimateProbeTokens(prompt)},
+        {"estimated_prompt_text_tokens_total", estimateProbeTokens(prompt) * int(selected.size())},
+        {"token_estimate_note", "Rough text-only estimate using a generic character heuristic; provider/model-specific tokenization, image input and generated output tokens are excluded."},
         {"planned_requests", selected.size()}, {"sent_requests", 0}, {"cancelled", false},
         {"conclusion", "Request acceptance does not prove semantic support. Results apply only to this model, endpoint and tested values."},
         {"results", Json::array()}};
+    int outputMin = 0, outputMax = 0, unknown = 0, partial = 0;
+    for (const auto& item : selected) {
+        auto usage = estimateProbeUsage(item.provider);
+        if (usage["output_min"].is_null()) ++unknown;
+        else { outputMin += usage["output_min"].get<int>(); outputMax += usage["output_max"].get<int>(); }
+        partial += usage["partial_image_overhead"].get<int>();
+    }
+    report["estimated_tokens"] = {{"text_input", estimateProbeTokens(prompt) * int(selected.size())},
+        {"image_input", options.generation ? Json(0) : Json(nullptr)},
+        {"output_min", unknown ? Json(nullptr) : Json(outputMin)}, {"output_max", unknown ? Json(nullptr) : Json(outputMax)},
+        {"unknown_output_requests", unknown}, {"partial_image_overhead", partial}, {"estimated", true}};
     bool stop = false;
     for (size_t i = 0; i < selected.size(); ++i) {
         const auto& item = selected[i];
         Json row{{"index", i}, {"name", item.name}, {"parameters", probeCaseParameters(item.provider)},
+            {"estimated_tokens", estimateProbeUsage(item.provider)},
             {"image_field", options.generation ? "" : item.provider.imageField}, {"status", 0},
             {"outcome", "skipped"}, {"detail", "前序请求失败，未发送"}};
         if (!stop && !cancel.stopped) {

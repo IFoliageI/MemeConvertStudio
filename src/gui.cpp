@@ -31,7 +31,8 @@ enum Id {
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
     GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
-    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry, RoutingEntry
+    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry, RoutingEntry,
+    GatewayUrlDisplay, GatewayKeyDisplay
 };
 struct State;
 struct View {
@@ -107,6 +108,7 @@ struct State {
         return plugins && std::find(enabledPlugins.begin(), enabledPlugins.end(), id) != enabledPlugins.end();
     }
     bool batchEnabled() const { return pluginEnabled("memestudio.batch-convert"); }
+    bool gatewayEnabled() const { return gatewayActive(pluginEnabled("memestudio.api-load-balancing"), routing); }
     void refreshViews() {
         frame = 0; elapsed = 0;
         for (auto& view : views) { view.zoom = 1; view.panX = view.panY = 0; }
@@ -552,6 +554,20 @@ static LRESULT CALLBACK settingsProcedure(HWND window, UINT message, WPARAM wpar
     }
     if (!state) return DefWindowProcW(window, message, wparam, lparam);
     if (message == WM_COMMAND) return SendMessageW(state->window, message, wparam, lparam);
+    if (message == WM_DRAWITEM && (wparam == GatewayUrlDisplay || wparam == GatewayKeyDisplay)) {
+        const auto& draw = *reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+        FillRect(draw.hDC, &draw.rcItem, GetSysColorBrush(COLOR_3DFACE));
+        auto bounds = draw.rcItem;
+        DrawEdge(draw.hDC, &bounds, EDGE_SUNKEN, BF_RECT);
+        InflateRect(&bounds, -5, -1);
+        SetBkMode(draw.hDC, TRANSPARENT); SetTextColor(draw.hDC, GetSysColor(COLOR_GRAYTEXT));
+        auto previous = SelectObject(draw.hDC, state->font);
+        auto label = state->text(draw.hwndItem);
+        DrawTextW(draw.hDC, label.c_str(), int(label.size()), &bounds,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(draw.hDC, previous);
+        return TRUE;
+    }
     if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT) {
         SetBkColor(reinterpret_cast<HDC>(wparam), RGB(255, 255, 255));
         SetTextColor(reinterpret_cast<HDC>(wparam), ink); return reinterpret_cast<LRESULT>(state->white);
@@ -612,6 +628,12 @@ static void createSettings(State& state) {
     label(L"供应商", 12);
     label(L"Base URL / 完整编辑接口地址", 44); editControl(BaseUrl, L"https://api.openai.com/v1", 66);
     label(L"API Key", 104); editControl(Key, L"", 126, 28, ES_PASSWORD);
+    control(state, state.settings, L"STATIC", L"\"Local Gateway\"", SS_OWNERDRAW,
+        GatewayUrlDisplay, 16, 66, 292, 28);
+    control(state, state.settings, L"STATIC", L"\"Some settings have been taken over by plugin\"", SS_OWNERDRAW,
+        GatewayKeyDisplay, 16, 126, 292, 28);
+    ShowWindow(state.get(GatewayUrlDisplay), SW_HIDE);
+    ShowWindow(state.get(GatewayKeyDisplay), SW_HIDE);
     checkbox(Remember, L"加密记住密钥（当前用户）", 160, false);
     label(L"模型", 194);
     auto model = combo(Model, 216, {L"gpt-image-1", L"gpt-image-1.5"}, true);
@@ -653,6 +675,18 @@ static void updateProviderControls(State& state) {
     auto format = state.text(state.get(OutputFormat));
     EnableWindow(state.get(Compression), !state.busy && (format == L"jpeg" || format == L"webp"));
     EnableWindow(state.get(PartialImages), !state.busy && state.checked(Streaming));
+    bool gateway = state.gatewayEnabled();
+    for (int id : {BaseUrl, Key}) {
+        EnableWindow(state.get(id), !state.busy && !gateway);
+        ShowWindow(state.get(id), gateway ? SW_HIDE : SW_SHOW);
+    }
+    for (int id : {GatewayUrlDisplay, GatewayKeyDisplay}) {
+        EnableWindow(state.get(id), FALSE);
+        ShowWindow(state.get(id), gateway ? SW_SHOW : SW_HIDE);
+        InvalidateRect(state.get(id), nullptr, TRUE);
+    }
+    EnableWindow(state.get(Remember), !state.busy && !gateway);
+    EnableWindow(state.get(FetchModels), !state.busy && !gateway);
 }
 static void saveSettings(State& state) {
     if (state.demo) return;
@@ -847,6 +881,7 @@ static Job drawingOptions(State& state) {
 static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
     state.plugins.reset();
     state.enabledPlugins.clear();
+    updateProviderControls(state);
     updatePluginEntries(state);
     updateSourceControls(state);
     auto logger = [window = state.window](const std::wstring& message) {
@@ -857,6 +892,7 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
     };
     state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger);
     state.enabledPlugins = enabled;
+    updateProviderControls(state);
     updatePluginEntries(state);
     if (!state.batchEnabled() && state.sources.size() > 1) {
         auto current = state.source; loadSource(state, current);
@@ -1072,7 +1108,7 @@ static void selectResult(State& state, size_t index) {
     state.resultPath = path; state.showingResult = true; state.refreshViews();
 }
 static void fetchModels(State& state) {
-    if (state.busy) return;
+    if (state.busy || state.gatewayEnabled()) return;
     Provider provider;
     provider.baseUrl = state.text(state.get(BaseUrl));
     provider.key = state.text(state.get(Key));
@@ -1140,16 +1176,16 @@ static void start(State& state, const Job* refinement) {
     try { job.provider.extra = Json::parse(utf8(state.text(state.get(Extra)))); }
     catch (...) { throw Error("扩展参数不是有效 JSON"); }
     if (!job.provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
-    if (state.pluginEnabled("memestudio.api-load-balancing") && state.routing.enabled) {
+    if (state.gatewayEnabled()) {
         auto logger = [window = state.window](const std::wstring& message) {
             auto event = std::make_unique<Progress>(); event->message = message;
             if (PostMessageW(window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(event.get()))) event.release();
         };
         auto router = std::make_shared<ApiRouter>(state.routing, job.provider, logger);
-        auto first = std::find_if(state.routing.channels.begin(), state.routing.channels.end(),
-            [](const auto& channel) { return channel.enabled; });
-        job.provider.baseUrl = first->baseUrl; job.provider.key = first->key;
-        job.provider.router = router; state.lastRouter = router;
+        job.provider.baseUrl = L"memestudio://local-gateway/v1";
+        job.provider.key = L"local-gateway";
+        job.provider.gateway = std::make_shared<AggregatedGateway>(router);
+        state.lastRouter = router;
     }
     if (job.provider.key.empty()) throw Error("请填写供应商 API Key");
     // Validate request shape before starting work or asking to replace an output.
@@ -1238,11 +1274,19 @@ static void startApiParameterTest(State& state) {
     try { provider.extra = Json::parse(utf8(state.text(state.get(Extra)))); }
     catch (...) { throw Error("扩展参数不是有效 JSON"); }
     if (!provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
-    if (provider.key.empty()) throw Error("请填写 API Key");
+    std::vector<ProbeTarget> targets;
+    if (state.gatewayEnabled()) {
+        for (const auto& channel : state.routing.channels) if (channel.enabled)
+            targets.push_back({channel.name, channelProvider(provider, channel)});
+        if (targets.empty()) throw Error("供应商池中没有启用的供应商");
+        for (const auto& target : targets) {
+            if (target.provider.key.empty()) throw Error("供应商池有空 Key，请先检查聚合网关配置");
+        }
+    } else if (provider.key.empty()) throw Error("请填写 API Key");
     if (provider.model.empty()) throw Error("请填写模型名称");
-    editUrl(provider.baseUrl);
+    editUrl(targets.empty() ? provider.baseUrl : targets.front().provider.baseUrl);
 
-    showParameterProbe(state.instance, state.window, provider, state.source, state.character, state.crop);
+    showParameterProbe(state.instance, state.window, provider, state.source, state.character, state.crop, false, {}, targets);
 }
 static void configureRouting(State& state) {
     if (state.busy || !state.pluginEnabled("memestudio.api-load-balancing")) return;
@@ -1268,7 +1312,8 @@ static void configureRouting(State& state) {
     provider.extra = Json::parse(utf8(state.text(state.get(Extra))));
     provider.router = state.lastRouter;
     if (editApiRouting(state.instance, state.window, state.routing, input)) {
-        saveSettings(state); state.logLine(L"API 均衡与灾备配置已保存，下次生成任务生效");
+        updateProviderControls(state);
+        saveSettings(state); state.logLine(L"聚合网关及供应商池已保存，下次生成任务生效");
     }
 }
 static void layout(State& state) {
@@ -1912,13 +1957,14 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         if (state.views[2].panX == 0) throw Error("Horizontal high-resolution pan failed");
         viewProcedure(state.mainView, WM_LBUTTONDBLCLK, 0, 0);
         if (state.views[2].zoom != 1 || state.views[2].panX != 0) throw Error("Preview reset failed");
-        Provider probeProvider; probeProvider.model = "gpt-image-test";
+        Provider probeProvider; probeProvider.model = "gpt-image-1";
+        Provider customProbe = probeProvider; customProbe.model = "supplier-custom-image";
         showParameterProbe(instance, window, probeProvider, demo / L"source.gif",
             demo / L"character.png", state.crop, true, [&](HWND dialog) {
                 RECT bounds{}; GetWindowRect(dialog, &bounds);
                 snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top,
                     L"ui-api-parameter-test.png", dialog);
-            });
+            }, {{"Pool A", probeProvider}, {"Pool B", customProbe}});
         report["api_parameter_test_dialog"] = "passed";
         RoutingOptions routeOptions;
         Job compareInput; compareInput.provider.model = "gpt-image-test"; compareInput.provider.key = L"ui-test-key";
@@ -1930,12 +1976,33 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top, L"ui-api-routing.png", dialog);
         }) || !routeOptions.enabled || routeOptions.channels.size() != 2)
             throw Error("Routing configuration capture failed");
+        auto savedRouting = state.routing;
+        auto savedUrl = state.text(state.get(BaseUrl)), savedKey = state.text(state.get(Key));
+        state.routing = routeOptions;
+        applyPlugins(state, {"memestudio.api-load-balancing"});
+        if (!state.gatewayEnabled() || IsWindowEnabled(state.get(BaseUrl)) || IsWindowEnabled(state.get(Key)) ||
+            state.text(state.get(GatewayUrlDisplay)) != L"\"Local Gateway\"" ||
+            state.text(state.get(GatewayKeyDisplay)) != L"\"Some settings have been taken over by plugin\"" ||
+            !(GetWindowLongW(state.get(GatewayKeyDisplay), GWL_STYLE) & SS_OWNERDRAW))
+            throw Error("Gateway takeover display failed");
+        snapshot(1120, 830, L"ui-gateway-takeover.png");
+        state.busy = true; updateProviderControls(state);
+        if (IsWindowEnabled(state.get(BaseUrl)) || IsWindowEnabled(state.get(Key)))
+            throw Error("Gateway credentials became editable while busy");
+        state.busy = false;
+        applyPlugins(state, {});
+        if (!IsWindowEnabled(state.get(BaseUrl)) || !IsWindowEnabled(state.get(Key)) ||
+            state.text(state.get(BaseUrl)) != savedUrl || state.text(state.get(Key)) != savedKey ||
+            (GetWindowLongW(state.get(GatewayKeyDisplay), GWL_STYLE) & WS_VISIBLE))
+            throw Error("Gateway unload did not restore original credentials");
+        state.routing = savedRouting;
         routeOptions.channels[1].model = "comparison-model-b";
         showApiComparison(instance, window, routeOptions, compareInput, true, [&](HWND dialog) {
             RECT bounds{}; GetWindowRect(dialog, &bounds);
             snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top, L"ui-api-comparison.png", dialog);
         });
         report["api_routing_dialogs"] = "passed (fixture previews; no network)";
+        report["gateway_takeover"] = "passed (quoted placeholders, disabled credentials, restoration, single-line ellipsis)";
         report["precision_wheel_messages"] = "passed";
         auto preview = std::make_unique<Progress>();
         preview->frame = 0; preview->total = 3; preview->partial = 0;

@@ -8,6 +8,7 @@ namespace studio {
 Provider channelProvider(const Provider& base, const ApiChannel& channel) {
     auto result = base;
     result.router.reset();
+    result.gateway.reset();
     result.baseUrl = channel.baseUrl; result.key = channel.key;
     if (!channel.model.empty()) result.model = channel.model;
     return result;
@@ -132,7 +133,7 @@ Image ApiRouter::invoke(const Provider& base, Cancel& cancel,
         tried[selected] = true;
         const auto& channel = options.channels[selected];
         auto label = wide(routingRedact(channel.name, options));
-        if (logger) logger(L"API 路由：" + label + L" · 模型 " + wide(channel.model.empty() ? base.model : channel.model));
+        if (logger) logger(L"聚合网关 → 供应商池：" + label + L" · 模型 " + wide(channel.model.empty() ? base.model : channel.model));
         auto start = std::chrono::steady_clock::now();
         try {
             auto image = request(channelProvider(base, channel));
@@ -172,7 +173,11 @@ Json ApiRouter::fingerprint() const {
     return result;
 }
 Json routingFingerprint(const Provider& provider) {
-    return provider.router ? provider.router->fingerprint() : Json();
+    return provider.gateway ? provider.gateway->fingerprint() :
+        provider.router ? provider.router->fingerprint() : Json();
+}
+bool gatewayActive(bool pluginLoaded, const RoutingOptions& options) {
+    return pluginLoaded && options.enabled;
 }
 Json ApiRouter::statistics() {
     std::lock_guard lock(mutex);

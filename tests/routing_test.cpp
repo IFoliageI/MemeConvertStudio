@@ -14,12 +14,23 @@ int routingTest(const fs::path& directory, const std::wstring& base) {
     auto image = [] { return Image{1, 1, {0, 0, 0, 255}}; };
     std::array<int, 2> counts{};
     auto request = [&](const Provider& target) {
-        require(!target.router, "Recursive router not cleared");
+        require(!target.router && !target.gateway, "Recursive gateway/router not cleared");
         ++counts[target.key == a.key ? 0 : 1]; return image();
     };
     ApiRouter weighted(options, provider);
     for (int i = 0; i < 40; ++i) weighted.invoke(provider, cancel, request);
     require(counts[0] == 30 && counts[1] == 10, "Request weights are incorrect");
+    {
+        auto router = std::make_shared<ApiRouter>(options, provider);
+        auto gateway = std::make_shared<AggregatedGateway>(router);
+        auto local = provider; local.gateway = gateway;
+        local.baseUrl = L"memestudio://local-gateway/v1"; local.key = L"local-gateway";
+        counts = {};
+        for (int i = 0; i < 4; ++i) gateway->forward(local, cancel, request);
+        require(counts[0] == 3 && counts[1] == 1, "Gateway did not distribute through provider pool");
+        require(gateway->statistics()[0]["successes"] == 3, "Gateway statistics lost");
+        require(gatewayActive(true, options) && !gatewayActive(false, options), "Gateway plugin gate failed");
+    }
     options.spending = true; options.channels[0].weight = 1; options.channels[1].unitCost = 3;
     ApiRouter cost(options, provider); counts = {};
     for (int i = 0; i < 40; ++i) cost.invoke(provider, cancel, request);

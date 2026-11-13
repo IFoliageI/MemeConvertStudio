@@ -45,7 +45,7 @@ void runDrawing(const Job& job, Cancel& cancel, const Reporter& report) {
     }
     if (job.plugins && !job.plugins->fingerprint(true).empty())
         manifest["plugins"] = job.plugins->fingerprint(true);
-    if (job.provider.router) manifest["api_routing"] = routingFingerprint(job.provider);
+    if (job.provider.router || job.provider.gateway) manifest["api_routing"] = routingFingerprint(job.provider);
     for (int i = 0; i < job.generationCount; ++i) {
         cancel.verify();
         auto output = fs::absolute(paths[i]).lexically_normal();

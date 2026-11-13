@@ -96,9 +96,10 @@ int wmain(int argc, wchar_t** argv) {
                     if (std::find(enabled.begin(), enabled.end(), "memestudio.api-load-balancing") == enabled.end())
                         throw Error("请先加载 API 负载均衡与灾备插件");
                     auto router = std::make_shared<ApiRouter>(options, job.provider);
-                    auto first = std::find_if(options.channels.begin(), options.channels.end(),
-                        [](const auto& channel) { return channel.enabled; });
-                    job.provider.baseUrl = first->baseUrl; job.provider.key = first->key; job.provider.router = router;
+                    job.provider.baseUrl = L"memestudio://local-gateway/v1";
+                    job.provider.key = L"local-gateway";
+                    job.provider.gateway = std::make_shared<AggregatedGateway>(router);
+                    job.provider.router = router;
                 }
             }
             Cancel cancel;

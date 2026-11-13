@@ -33,10 +33,14 @@ int parameterProbeTest(const fs::path& directory, const std::wstring& base) {
         add(value, "fallback", {{"stream", true}, {"mock_mode", "json"}});
         Cancel cancel;
         auto report = runParameterProbe(value, cancel);
+        expect(report["estimated_prompt_text_tokens_per_request"].get<int>() > 0 &&
+            report["estimated_prompt_text_tokens_total"].get<int>() ==
+                report["estimated_prompt_text_tokens_per_request"].get<int>() * 7, "Token estimate does not match request budget");
         writeJson(directory / L"matrix.json", report);
         auto& rows = report["results"];
         expect(report["sent_requests"] == 7, "Unexpected request count or automatic retry");
         expect(rows[0]["outcome"] == "accepted" && rows[1]["outcome"] == "accepted", "Valid image rejected");
+        expect(rows[0]["estimated_tokens"]["output_min"].is_null(), "Unknown provider model received a fabricated output estimate");
         expect(rows[2]["outcome"] == "rejected" && rows[2]["status"] == 400, "Explicit parameter rejection lost");
         expect(rows[3]["outcome"] == "accepted" && rows[3]["streamed"] == true &&
             rows[3]["partial_images_received"] == 1, "SSE evidence missing");
@@ -45,6 +49,17 @@ int parameterProbeTest(const fs::path& directory, const std::wstring& base) {
         expect(rows[6]["outcome"] == "ignored", "Ignored streaming flag accepted");
         expect(report.dump().find("probe-test-secret") == std::string::npos &&
             report.dump().find("[REDACTED]") != std::string::npos, "Report leaked API key");
+    });
+    test("Legacy output token estimates and unknown model handling", [&] {
+        Provider provider; provider.model = "gpt-image-1"; provider.quality = "low"; provider.size = "1024x1024";
+        auto usage = estimateProbeUsage(provider);
+        expect(usage["output_min"] == 272 && usage["output_max"] == 272, "Known output estimate is incorrect");
+        provider.quality = "auto"; provider.size = "auto"; provider.stream = true; provider.partialImages = 3;
+        usage = estimateProbeUsage(provider);
+        expect(usage["output_min"] == 272 && usage["output_max"] == 6240 &&
+            usage["partial_image_overhead"] == 300, "Auto/stream estimate is incorrect");
+        provider.model = "custom-provider-model";
+        expect(estimateProbeUsage(provider)["output_min"].is_null(), "Custom output model must remain unknown");
     });
     test("Generation JSON has no image upload", [&] {
         auto value = options(L"/generation/v1", true); add(value, "quality", {{"quality", "low"}});

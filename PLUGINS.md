@@ -88,6 +88,11 @@ SDK 不依赖 OpenAI SDK 或第三方框架。
 `{"action":"api_routing"}`。DLL 只提供入口，配置、凭据、调度、统计和对比由宿主执行。
 独立源码与单插件构建位于 `plugin-api-load-balancing` 分支。
 GUI 用法及灾备边界见 README 的“API 负载均衡与灾备”。
+聚合网关为进程内本地 API：`memestudio://local-gateway/v1`，
+由宿主接收图像请求，再交给供应商池的加权调度器。
+该逻辑地址不会被 WinHTTP 当作供应商请求发送，也不启动对外的 HTTP 端口。
+主界面 URL / Key 使用独立灰色显示层展示带引号的接管提示，
+单行绘制并在不足时用 `...` 截断，原控件的真实配置保持原值并禁用。
 
 CLI 在原有任务配置增加以下字段；不在 JSON 中填写明文 Key，使用环境变量：
 
@@ -149,6 +154,16 @@ GUI 的加密凭据只能由当前 Windows 用户解密；CLI 只读取环境变
 每次新任务重置路由健康和份额统计，同一多源批次共享一个路由器。
 
 ## API 参数支持测试
+
+1.1 版增加逐项与整轮的预估 Token：
+`estimated_prompt_text_tokens_per_request` 和 `estimated_prompt_text_tokens_total`
+是通用字符启发式的提示文本估算；`estimated_tokens` 记录文本、输出范围和局部图开销，
+编辑输入的 `image_input` 为 `null` 表示待定。每个结果行也包含对应的 `estimated_tokens`。
+这些都是计划请求的预估，不是供应商返回的实际 usage；提前停止不重写原计划估算。
+已知旧版 GPT Image 标准规格使用官方输出 Token 表，
+不认识的模型或规格保持 `output_min/output_max = null`。
+网关开启时可从“供应商池”下拉框选择固定测试目标，切换目标会重置测试清单和当前报告，
+测试请求直接发送到该供应商，避免均衡或灾备混淆参数判定。
 
 插件 ID 为 `memestudio.api-parameter-test`。在插件管理中勾选并应用，
 执行“测试当前供应商参数…”。该插件仅声明命令；供应商认证、请求与响应解析

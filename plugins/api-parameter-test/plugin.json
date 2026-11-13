@@ -2,8 +2,8 @@
   "api_version": 1,
   "id": "memestudio.api-parameter-test",
   "name": "API 参数支持测试",
-  "version": "1.0.0",
-  "description": "逐项和组合测试供应商图像编辑接口的已配置参数，不保存生成结果。",
+  "version": "1.1.0",
+  "description": "逐项与组合测试供应商参数，显示预估 Token，并可固定选择供应商池中的测试目标。",
   "library": "api-parameter-test.dll",
   "commands": [
     {"id": "test-parameters", "title": "测试当前供应商参数…"}

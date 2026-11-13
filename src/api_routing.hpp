@@ -39,8 +39,20 @@ public:
     Json fingerprint() const;
     Json statistics();
 };
+class AggregatedGateway {
+    std::shared_ptr<ApiRouter> router;
+public:
+    explicit AggregatedGateway(std::shared_ptr<ApiRouter> value) : router(std::move(value)) {}
+    Image forward(const Provider& request, Cancel& cancel,
+        const std::function<Image(const Provider&)>& upstream) const {
+        return router->invoke(request, cancel, upstream);
+    }
+    Json statistics() { return router->statistics(); }
+    Json fingerprint() const { return router->fingerprint(); }
+};
 Provider channelProvider(const Provider& base, const ApiChannel& channel);
 Json routingFingerprint(const Provider& provider);
+bool gatewayActive(bool pluginLoaded, const RoutingOptions& options);
 std::string routingRedact(std::string text, const RoutingOptions& options);
 std::vector<size_t> comparisonChannels(const RoutingOptions& options, const Provider& base = {});
 void showApiComparison(HINSTANCE instance, HWND owner, const RoutingOptions& options, const Job& input,

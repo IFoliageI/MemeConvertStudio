@@ -452,6 +452,9 @@ static Image imageRequest(const Provider& provider, const std::wstring& url, con
 }
 Image edit(const Provider& provider, const std::string& text, const std::vector<Upload>& images, Cancel& cancel,
     const std::function<void(const Image&, int)>& preview) {
+    if (provider.gateway) return provider.gateway->forward(provider, cancel, [&](const Provider& target) {
+        return edit(target, text, images, cancel, preview);
+    });
     if (provider.router) return provider.router->invoke(provider, cancel, [&](const Provider& target) {
         return edit(target, text, images, cancel, preview);
     });
@@ -459,6 +462,9 @@ Image edit(const Provider& provider, const std::string& text, const std::vector<
 }
 Image generate(const Provider& provider, const std::string& text, const std::vector<Upload>& styles,
     Cancel& cancel, const std::function<void(const Image&, int)>& preview) {
+    if (provider.gateway) return provider.gateway->forward(provider, cancel, [&](const Provider& target) {
+        return generate(target, text, styles, cancel, preview);
+    });
     if (provider.router) return provider.router->invoke(provider, cancel, [&](const Provider& target) {
         return generate(target, text, styles, cancel, preview);
     });

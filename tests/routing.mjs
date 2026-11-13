@@ -6,7 +6,8 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const exe = path.join(root, "bin", "MemeStudio-routing.exe");
+const exe = process.argv.find(arg => arg.startsWith("--exe="))?.slice(6) ??
+  path.join(root, "bin", "MemeStudio-routing.exe");
 const directory = path.join(root, "tmp", "routing", Date.now().toString(36));
 const fixtures = path.join(root, "tmp", "tests");
 await fs.mkdir(directory, { recursive: true });

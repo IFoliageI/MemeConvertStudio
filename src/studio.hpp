@@ -57,6 +57,7 @@ void savePng(const fs::path& path, const Image& image);
 void saveGif(const fs::path& path, const std::vector<Frame>& frames, UINT loop);
 
 class ApiRouter;
+class AggregatedGateway;
 struct Provider {
     std::wstring baseUrl = L"https://api.openai.com/v1";
     std::wstring key;
@@ -71,6 +72,7 @@ struct Provider {
     Json extra = Json::object();
     int timeoutSeconds = 600;
     std::shared_ptr<ApiRouter> router;
+    std::shared_ptr<AggregatedGateway> gateway;
 };
 struct ApiHttpError : Error {
     DWORD status;
