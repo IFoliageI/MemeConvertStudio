@@ -2,6 +2,7 @@
 #include "plugins.hpp"
 #include "presets.hpp"
 #include "batch.hpp"
+#include "api_probe.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -29,7 +30,7 @@ enum Id {
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
     GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
-    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry
+    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry
 };
 struct State;
 struct View {
@@ -806,11 +807,13 @@ static void dropFiles(State& state, HDROP drop, int kind) {
     }
 }
 static void start(State& state, const Job* refinement = nullptr);
+static void startApiParameterTest(State& state);
 static void updatePluginEntries(State& state) {
     int x = 380;
     for (const auto& [id, plugin] : {
         std::pair{RefineEntry, "memestudio.local-redraw"},
-        std::pair{DrawingEntry, "memestudio.prompt-draw"}}) {
+        std::pair{DrawingEntry, "memestudio.prompt-draw"},
+        std::pair{ApiTestEntry, "memestudio.api-parameter-test"}}) {
         auto entry = GetDlgItem(state.window, id);
         bool loaded = state.pluginEnabled(plugin);
         if (loaded) {
@@ -857,7 +860,7 @@ enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, Plug
 struct PluginDialog {
     State* state;
     HWND list{}, commands{};
-    bool capture = false;
+    bool capture = false, apiTest = false;
     std::string failure;
     std::optional<Job> refinement;
 };
@@ -987,6 +990,13 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
                 }
                 return TRUE;
             }
+            if (result.value("action", "") == "api_parameter_test") {
+                if (info.id != "memestudio.api-parameter-test")
+                    throw Error("仅 API 参数支持测试插件可启动该流程");
+                dialog->apiTest = true;
+                EndDialog(window, IDOK);
+                return TRUE;
+            }
             if (result.value("action", "") == "refine") {
                 Job job; job.source = state.resultPath;
                 if (editRefinement(state.instance, window, job, false)) {
@@ -1041,6 +1051,7 @@ static void managePlugins(State& state, bool capture = false) {
     if (result == -1) throw Error("无法打开插件管理窗口");
     if (!dialog.failure.empty()) throw Error(dialog.failure);
     if (dialog.refinement) start(state, &*dialog.refinement);
+    if (dialog.apiTest) startApiParameterTest(state);
 }
 static void selectResult(State& state, size_t index) {
     auto path = state.resultPaths.at(index);
@@ -1178,6 +1189,38 @@ static void start(State& state, const Job* refinement) {
         if (PostMessageW(state.window, WM_FINISHED, 0, reinterpret_cast<LPARAM>(completion.get()))) completion.release();
     });
 }
+static void startApiParameterTest(State& state) {
+    if (state.busy) return;
+    if (!state.pluginEnabled("memestudio.api-parameter-test"))
+        throw Error("请先加载 API 参数支持测试插件");
+    Provider provider;
+    provider.baseUrl = state.text(state.get(BaseUrl));
+    provider.key = state.text(state.get(Key));
+    provider.model = utf8(state.text(state.get(Model)));
+    provider.quality = utf8(state.text(state.get(Quality)));
+    provider.size = utf8(state.text(state.get(Size)));
+    provider.imageField = utf8(state.text(state.get(ImageField)));
+    provider.complexity = utf8(state.text(state.get(Complexity)));
+    provider.outputFormat = utf8(state.text(state.get(OutputFormat)));
+    if (provider.quality == utf8(L"不发送")) provider.quality.clear();
+    if (provider.size == utf8(L"不发送")) provider.size.clear();
+    if (provider.complexity == utf8(L"不发送")) provider.complexity.clear();
+    if (provider.outputFormat == utf8(L"不发送")) provider.outputFormat.clear();
+    if ((provider.outputFormat == "jpeg" || provider.outputFormat == "webp") &&
+        state.text(state.get(Compression)) != L"不发送")
+        provider.compression = state.number(Compression, 0, 100);
+    provider.stream = state.checked(Streaming);
+    if (provider.stream) provider.partialImages = state.number(PartialImages, 1, 3);
+    provider.timeoutSeconds = state.number(Timeout, 5, 3600);
+    try { provider.extra = Json::parse(utf8(state.text(state.get(Extra)))); }
+    catch (...) { throw Error("扩展参数不是有效 JSON"); }
+    if (!provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
+    if (provider.key.empty()) throw Error("请填写 API Key");
+    if (provider.model.empty()) throw Error("请填写模型名称");
+    editUrl(provider.baseUrl);
+
+    showParameterProbe(state.instance, state.window, provider, state.source, state.character, state.crop);
+}
 static void layout(State& state) {
     RECT rect; GetClientRect(state.window, &rect);
     int width = rect.right, height = rect.bottom, left = 258, right = 332;
@@ -1257,6 +1300,7 @@ static void initialize(State& state) {
     button(SourceTab, L"原图", 0, 0, 82, false); button(ResultTab, L"结果", 0, 0, 82, false);
     button(RefineEntry, L"局部重绘…", 380, 15, 120);
     button(DrawingEntry, L"无图绘制…", 510, 15, 120);
+    button(ApiTestEntry, L"API 参数测试…", 640, 15, 120);
     state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
         WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
     ShowWindow(state.resultChoice, SW_HIDE);
@@ -1317,6 +1361,7 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == ApiTestEntry && !state.busy) { startApiParameterTest(state); return; }
     if (id == DrawingEntry && !state.busy) {
         if (!state.plugins) return;
         auto action = state.plugins->command("memestudio.prompt-draw", "draw", Json::object(), state.window);
@@ -1658,6 +1703,13 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             }
         };
         checkPluginVisibility(false, false, false);
+        if (visible(ApiTestEntry)) throw Error("API test entry visible without its plugin");
+        applyPlugins(state, {"memestudio.api-parameter-test"});
+        if (!visible(ApiTestEntry) || !IsWindowEnabled(GetDlgItem(window, ApiTestEntry)) ||
+            state.plugins->command("memestudio.api-parameter-test", "test-parameters", Json::object(), window)
+                .value("action", "") != "api_parameter_test") throw Error("API test plugin entry failed");
+        applyPlugins(state, {});
+        if (visible(ApiTestEntry)) throw Error("API test entry visible after unloading");
         auto savedInstruction = state.text(state.instruction);
         applyPlugins(state, {"memestudio.example"});
         if (state.plugins->fingerprint().size() != 1 ||
@@ -1703,7 +1755,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         if (IsWindowEnabled(GetDlgItem(window, DrawingEntry))) throw Error("Disabled drawing entry is active");
         report["drawing_plugin"] = "passed";
         checkPluginVisibility(false, false, false);
-        applyPlugins(state, {"memestudio.local-redraw", "memestudio.prompt-draw", "memestudio.batch-convert"});
+        applyPlugins(state, {"memestudio.local-redraw", "memestudio.prompt-draw", "memestudio.batch-convert", "memestudio.api-parameter-test"});
         checkPluginVisibility(true, true, true);
         snapshot(1120, 830, L"ui-plugins-enabled.png");
         state.busy = true;
@@ -1801,6 +1853,14 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         if (state.views[2].panX == 0) throw Error("Horizontal high-resolution pan failed");
         viewProcedure(state.mainView, WM_LBUTTONDBLCLK, 0, 0);
         if (state.views[2].zoom != 1 || state.views[2].panX != 0) throw Error("Preview reset failed");
+        Provider probeProvider; probeProvider.model = "gpt-image-test";
+        showParameterProbe(instance, window, probeProvider, demo / L"source.gif",
+            demo / L"character.png", state.crop, true, [&](HWND dialog) {
+                RECT bounds{}; GetWindowRect(dialog, &bounds);
+                snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top,
+                    L"ui-api-parameter-test.png", dialog);
+            });
+        report["api_parameter_test_dialog"] = "passed";
         report["precision_wheel_messages"] = "passed";
         auto preview = std::make_unique<Progress>();
         preview->frame = 0; preview->total = 3; preview->partial = 0;

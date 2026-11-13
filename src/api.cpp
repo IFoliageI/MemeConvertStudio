@@ -332,6 +332,89 @@ public:
         return std::move(result);
     }
 };
+ApiProbeResult probeImage(const Provider& provider, const std::string& text,
+    const std::vector<Upload>& images, bool generation, Cancel& cancel) {
+    Multipart body;
+    if (generation) {
+        auto json = generationBody(provider, text).dump();
+        body = {"application/json", Bytes(json.begin(), json.end())};
+    } else body = multipart(provider, text, images);
+    ApiProbeResult result;
+    std::function<void(const Image&, int)> preview = [&](const Image&, int) { ++result.partialImages; };
+    ImageStream stream(provider, preview);
+    bool streamFailed = false;
+    std::string streamError;
+    auto response = request(generation ? generationUrl(provider.baseUrl) : editUrl(provider.baseUrl),
+        L"POST", authorization(provider) + L"\r\nContent-Type: " + wide(body.type) +
+            (provider.stream ? L"\r\nAccept: text/event-stream" : L""),
+        body.data, provider.timeoutSeconds, cancel,
+        [&](const char* bytes, size_t size) {
+            if (streamFailed) return;
+            try { stream.feed(bytes, size); }
+            catch (const std::exception& error) { streamFailed = true; streamError = error.what(); }
+        });
+    result.status = response.status; result.streamed = response.streamed;
+    try {
+        if (response.streamed) {
+            if (streamFailed) throw Error(streamError);
+            stream.finish();
+            result.outcome = "accepted";
+            result.detail = "Valid SSE final image; partial images received: " + std::to_string(result.partialImages);
+            if (provider.stream && !result.partialImages)
+                result.detail += "; partial image count is unverified";
+        } else {
+            auto json = Json::parse(response.data.begin(), response.data.end(), nullptr, false);
+            if (json.is_object() && json.contains("error") && json["error"].is_object() &&
+                json["error"].contains("param") && json["error"]["param"].is_string())
+                result.errorParameter = json["error"]["param"].get<std::string>();
+            auto value = jsonResponse(response, provider);
+            if (!value.is_object() || !value.contains("data") || !value["data"].is_array() ||
+                value["data"].empty() || !value["data"][0].is_object()) throw Error("Missing data[0] image");
+            const auto& item = value["data"][0];
+            bool inlineImage = item.contains("b64_json") && item["b64_json"].is_string();
+            bool urlImage = item.contains("url") && item["url"].is_string() && !item["url"].get<std::string>().empty();
+            if (!inlineImage && !urlImage) throw Error("Missing b64_json or image URL");
+            result.outcome = "accepted";
+            result.detail = "Image response received; parameter semantics are unverified";
+            if (inlineImage) {
+                auto bytes = unbase64(item["b64_json"].get<std::string>());
+                decode(bytes);
+                std::string format;
+                if (bytes.size() >= 8 && bytes[0] == 137 && bytes[1] == 'P' && bytes[2] == 'N') format = "png";
+                else if (bytes.size() >= 3 && bytes[0] == 255 && bytes[1] == 216) format = "jpeg";
+                else if (bytes.size() >= 12 && std::string(bytes.begin(), bytes.begin() + 4) == "RIFF" &&
+                    std::string(bytes.begin() + 8, bytes.begin() + 12) == "WEBP") format = "webp";
+                if (!provider.outputFormat.empty() && !format.empty() && format != provider.outputFormat) {
+                    result.outcome = "ignored";
+                    result.detail = "Requested output_format=" + provider.outputFormat + "; received " + format;
+                }
+            } else result.detail = "Image URL returned; URL contents and parameter semantics unverified (no download)";
+            if (provider.stream) {
+                result.outcome = "ignored";
+                result.detail = "Requested stream=true; received JSON instead of SSE";
+            }
+        }
+    } catch (const std::exception& error) {
+        result.detail = error.what();
+        result.outcome = response.status == 400 || response.status == 422 ? "request_rejected" : "inconclusive";
+    }
+    auto secret = utf8(provider.key);
+    auto sanitize = [&](std::string& value) {
+        if (!secret.empty()) for (size_t pos = 0; (pos = value.find(secret, pos)) != std::string::npos;) {
+            value.replace(pos, secret.size(), "[REDACTED]"); pos += 10;
+        }
+        // Limit on Unicode characters so truncation cannot leave invalid UTF-8 in reports.
+        auto textValue = wide(value);
+        if (textValue.size() > 900) {
+            textValue.resize(899);
+            if (textValue.back() >= 0xD800 && textValue.back() <= 0xDBFF) textValue.pop_back();
+            textValue += L"…";
+        }
+        value = utf8(textValue);
+    };
+    sanitize(result.detail); sanitize(result.errorParameter);
+    return result;
+}
 static Image imageRequest(const Provider& provider, const std::wstring& url, const Multipart& body,
     Cancel& cancel, const std::function<void(const Image&, int)>& preview) {
     auto headers = authorization(provider);

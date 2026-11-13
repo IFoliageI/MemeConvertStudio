@@ -48,6 +48,7 @@ __cdecl MemeStudioGetPluginV1(void)`。返回静态存储的结构，设置 `str
   `{"action":"configure_upscale"}` 打开外部 Waifu2x 设置。服务由宿主执行，
   插件无需持有供应商配置或重复实现网络传输。
   `{"action":"prompt_draw"}` 打开无图绘制窗口；需要启用 `memestudio.prompt-draw`。
+  `{"action":"api_parameter_test"}` 打开参数测试窗口，仅允许 `memestudio.api-parameter-test` 调用。
 - `shutdown`：卸载前释放插件资源；初始化失败时也会调用，须容忍部分初始化。
 
 命令上下文包含 source、character、output、当前选中成品 result 路径和 instruction；帧回调包含
@@ -72,13 +73,50 @@ frame_count 为 1，variation_index 区分生成副本。
 ## 构建
 
 `.\build.ps1` 同时构建程序与 `example`、`local-redraw`、`waifu2x`、
-`batch-convert`、`prompt-draw` 五个插件，分别放到 `bin/plugins/<插件目录>`。
-CMake 也会复制五个插件到程序旁。
+`batch-convert`、`prompt-draw`、`api-parameter-test` 六个插件，分别放到 `bin/plugins/<插件目录>`。
+CMake 也会复制六个插件到程序旁。
 SDK 不依赖 OpenAI SDK 或第三方框架。
 
 命令行任务可设置 `"plugins":["memestudio.example"]`；
 可选 `"plugin_directory":"D:/my-plugins"` 指定其他插件目录。
 不填写 plugins 时不加载插件。CLI 遇到不可用插件会直接报错。
+
+## API 参数支持测试
+
+插件 ID 为 `memestudio.api-parameter-test`。在插件管理中勾选并应用，
+执行“测试当前供应商参数…”。该插件仅声明命令；供应商认证、请求与响应解析
+由主程序完成，密钥不会传入 DLL。
+
+窗口提供图片编辑 `/images/edits` 和纯文本生成 `/images/generations` 两种端点。
+编辑默认使用当前表情与人物参考图的首帧及当前人物裁剪；图像未导入时使用内置诊断图。
+纯文本生成不上传图像。参数候选覆盖当前已配置的 Quality、Size、Complexity、Format、
+Compression、流式和局部预览数量、扩展 JSON 字段及多图字段，并提供常用取值。
+可逐项勾选，也可输入 JSON 数组添加自定义组合：
+
+```json
+[
+  {
+    "name": "低质量 JPEG",
+    "parameters": {
+      "quality": "low",
+      "output_format": "jpeg",
+      "output_compression": 80
+    }
+  }
+]
+```
+
+自定义参数遵守主程序同一参数校验规则。基线固定执行，确认请求数后才开始，
+每个用例至多一次，上限 64 项，不自动重试。基线、鉴权、限流、服务器或网络失败时
+停止后续请求；取消会中止当前网络等待，但不能撤回供应商已经接收的请求。
+
+每个已接受的调用可能产生费用或保留供应商侧数据；探测使用简短诊断提示。
+请求被拒绝、明确指向测试参数的错误、收到普通 JSON 而非 SSE、以及无法判断会分开记录。
+HTTP 成功仅说明供应商接受该调用，不证明画质、压缩质量或模型遵循程度。
+普通响应如仅返回 URL，不下载结果；报告不包含 API Key、请求图片或生成图，
+仅包含模型、参数、响应状态、有限长度错误摘要和耗时。不要用真实敏感图片做探测。
+
+报告可从窗口导出 JSON。独立 `plugin-api-parameter-test` 分支仅包含该插件及其单插件构建文件。
 
 ## 无图绘制
 

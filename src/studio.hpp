@@ -83,10 +83,18 @@ struct Cancel {
 };
 struct Upload { std::string name; Bytes data; };
 struct Multipart { std::string type; Bytes data; };
+struct ApiProbeResult {
+    DWORD status = 0;
+    std::string outcome = "inconclusive", detail, errorParameter;
+    bool streamed = false;
+    int partialImages = 0;
+};
 std::wstring editUrl(std::wstring base);
 std::wstring generationUrl(const std::wstring& base);
 std::wstring modelsUrl(const std::wstring& base);
 std::vector<std::string> listModels(const Provider& provider, Cancel& cancel);
+ApiProbeResult probeImage(const Provider& provider, const std::string& prompt,
+    const std::vector<Upload>& images, bool generation, Cancel& cancel);
 Multipart multipart(const Provider& provider, const std::string& prompt,
                     const std::vector<Upload>& images);
 Json generationBody(const Provider& provider, const std::string& prompt);

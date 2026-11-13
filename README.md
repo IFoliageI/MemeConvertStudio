@@ -12,15 +12,16 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
 
-完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有五个精简插件分支；它们不包含应用宿主源码或其他插件：
+完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有六个精简插件分支；它们不包含应用宿主源码或其他插件：
 
 - [`plugin-example`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-example)：示例提示词插件。
 - [`plugin-local-redraw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-local-redraw)：局部重绘命令插件。
 - [`plugin-waifu2x`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-waifu2x)：Waifu2x 输入/输出超分命令插件。
 - [`plugin-batch-convert`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-batch-convert)：多源图片和 GIF 批量转换插件。
 - [`plugin-prompt-draw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-prompt-draw)：纯提示词及可选画风参考的无图绘制插件。
+- [`plugin-api-parameter-test`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-parameter-test)：逐项探测模型、端点及已配置图像参数的支持情况。
 
-每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1`、专属 README 和自动编译工作流。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分、批量转换与无图绘制插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
+每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1`、专属 README 和自动编译工作流。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分、批量转换、无图绘制和参数测试插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -50,7 +51,7 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 ## 批量生成与插件
 
 插件专属控件只在对应插件勾选、应用并成功加载后显示：
-局部重绘与无图绘制显示顶部入口，批量转换显示目录按钮和素材翻页。
+局部重绘、无图绘制与参数测试显示顶部入口，批量转换显示目录按钮和素材翻页。
 停用或加载失败后隐藏对应控件，顶部入口自动紧凑排列；
 任务执行时已加载的入口保持显示并暂时禁用。
 
@@ -124,6 +125,7 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 
 其他默认关闭的功能插件：
 
+- **API 参数支持测试**：从插件管理执行“测试当前供应商参数…”。先测试不带可选参数的基线，再分别测试已配置参数和完整组合；另提供 Quality、Complexity、Size、Format、Compression、流式和图片字段候选值，可勾选运行并追加自定义 JSON 参数组合。图片编辑使用当前源图与人物图首帧（未导入时使用内置诊断图）；也可切换纯文本 `/images/generations`。每项一次、不自动重试，开始前确认请求数和潜在费用；导出的报告不包含 API Key 或图像。HTTP 接受仅能验证请求格式，不能证明画质、压缩效果或完整流行为；拒绝、流式被忽略和无法判断分别标记。需使用包含宿主探测服务的新版主程序。
 - **局部重绘**：启用后从顶部“局部重绘…”进入，默认读取当前选中的成品，
   可框选矩形、输入修正要求、添加本轮新画风参考并另存；支持静态图和完整 GIF。
   PNG 的选区外像素由本地合成保留。GIF 仍会重新量化颜色。
@@ -234,7 +236,7 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 其中包含完整应用包 `MemeStudio-Windows-x64.zip` 和插件包 `MemeStudio-Plugins.zip`。
 构建产物保存 14 天。同一分支新提交会取消旧构建。
 
-五个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
+六个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
 只构建该分支对应插件。下载其 `MemeStudio-Plugin-Windows-x64`，
 将解压后的 `plugins` 目录放到兼容的主程序旁。工作流不创建 GitHub Release。
 

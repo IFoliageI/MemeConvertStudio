@@ -1,4 +1,5 @@
 #include "../src/studio.hpp"
+#include "../src/api_probe.hpp"
 #include <sstream>
 #include <algorithm>
 #include <thread>
@@ -114,6 +115,28 @@ int selfTest(const fs::path& directory) {
         expect(data.find("name=\"input_fidelity\"") != std::string::npos, "Extra parameter missing");
         provider.extra["n"] = 2;
         rejects([&] { multipart(provider, "", {{"source", {1}}}); }, "Reserved parameter accepted");
+    });
+    test("API probe matrix and bounded custom combinations", [&] {
+        Provider provider;
+        provider.key = L"probe-test-secret"; provider.quality = "high"; provider.size = "1024x1024";
+        provider.complexity = "medium"; provider.outputFormat = "jpeg"; provider.compression = 80;
+        provider.stream = true; provider.partialImages = 3; provider.imageField = "image";
+        provider.extra = {{"input_fidelity", "high"}};
+        auto cases = parameterProbeCases(provider, false);
+        expect(cases.size() >= 20 && cases.size() <= 64 && cases.front().selected &&
+            cases.front().provider.quality.empty() && cases.front().provider.extra.empty(),
+            "Probe baseline or bounded candidate matrix invalid");
+        auto generation = parameterProbeCases(provider, true);
+        expect(std::none_of(generation.begin(), generation.end(),
+            [](const auto& item) { return item.name.find("image field") != std::string::npos; }),
+            "Generation mode includes multipart-only image-field probe");
+        auto custom = customProbeCase(provider, {{"name", "low quality webp"},
+            {"parameters", {{"quality", "low"}, {"output_format", "webp"}, {"output_compression", 75}}}});
+        expect(custom.provider.quality == "low" && custom.provider.outputFormat == "webp" &&
+            custom.provider.compression == 75, "Custom probe combination changed");
+        rejects([&] { customProbeCase(provider, {{"parameters", {{"model", "other"}}}}); },
+            "Custom probe allowed reserved model override");
+        expect(probeImages().size() == 1, "Missing-input diagnostic image unavailable");
     });
     test("Prompt source, identity, style and anchor ordering", [&] {
         Job job; auto text = prompt(job, 1, 4, 2, true);

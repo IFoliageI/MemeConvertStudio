@@ -1,6 +1,7 @@
 #include "studio.hpp"
 #include "plugins.hpp"
 #include "batch.hpp"
+#include "api_probe.hpp"
 #include <shellapi.h>
 #include <iostream>
 #include <algorithm>
@@ -15,6 +16,8 @@ int wmain(int argc, wchar_t** argv) {
             exitCode = selfTest(argv[2]);
         } else if (argc >= 4 && std::wstring(argv[1]) == L"--network-test") {
             exitCode = networkTest(argv[2], argv[3]);
+        } else if (argc >= 4 && std::wstring(argv[1]) == L"--parameter-probe-test") {
+            exitCode = parameterProbeTest(argv[2], argv[3]);
         } else if (argc >= 4 && std::wstring(argv[1]) == L"--inspect") {
             auto animation = decode(fs::path(argv[2]));
             Json info{{"width", animation.frames.front().image.width}, {"height", animation.frames.front().image.height},
