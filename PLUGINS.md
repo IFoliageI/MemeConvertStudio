@@ -49,6 +49,7 @@ __cdecl MemeStudioGetPluginV1(void)`。返回静态存储的结构，设置 `str
   插件无需持有供应商配置或重复实现网络传输。
   `{"action":"prompt_draw"}` 打开无图绘制窗口；需要启用 `memestudio.prompt-draw`。
   `{"action":"api_parameter_test"}` 打开参数测试窗口，仅允许 `memestudio.api-parameter-test` 调用。
+  `{"action":"api_routing"}` 打开多 API / Key、灾备和对比配置，仅允许 `memestudio.api-load-balancing` 调用。
 - `shutdown`：卸载前释放插件资源；初始化失败时也会调用，须容忍部分初始化。
 
 命令上下文包含 source、character、output、当前选中成品 result 路径和 instruction；帧回调包含
@@ -73,13 +74,79 @@ frame_count 为 1，variation_index 区分生成副本。
 ## 构建
 
 `.\build.ps1` 同时构建程序与 `example`、`local-redraw`、`waifu2x`、
-`batch-convert`、`prompt-draw`、`api-parameter-test` 六个插件，分别放到 `bin/plugins/<插件目录>`。
-CMake 也会复制六个插件到程序旁。
+`batch-convert`、`prompt-draw`、`api-parameter-test`、`api-load-balancing` 七个插件，分别放到 `bin/plugins/<插件目录>`。
+CMake 也会复制七个插件到程序旁。
 SDK 不依赖 OpenAI SDK 或第三方框架。
 
 命令行任务可设置 `"plugins":["memestudio.example"]`；
 可选 `"plugin_directory":"D:/my-plugins"` 指定其他插件目录。
 不填写 plugins 时不加载插件。CLI 遇到不可用插件会直接报错。
+
+## API 负载均衡与灾备
+
+插件 ID：`memestudio.api-load-balancing`，命令 `configure-routing` 返回
+`{"action":"api_routing"}`。DLL 只提供入口，配置、凭据、调度、统计和对比由宿主执行。
+独立源码与单插件构建位于 `plugin-api-load-balancing` 分支。
+GUI 用法及灾备边界见 README 的“API 负载均衡与灾备”。
+
+CLI 在原有任务配置增加以下字段；不在 JSON 中填写明文 Key，使用环境变量：
+
+```json
+{
+  "plugins": ["memestudio.api-load-balancing"],
+  "api_routing": {
+    "enabled": true,
+    "spending": false,
+    "failover": true,
+    "service_failover": false,
+    "cooldown_seconds": 60,
+    "channels": [
+      {
+        "name": "API-A / Key-1",
+        "base_url": "https://api-a.example/v1",
+        "api_key_env": "API_A_KEY_1",
+        "model": "gpt-image-1",
+        "weight": 3,
+        "priority": 0,
+        "unit_cost": 1,
+        "enabled": true,
+        "compare": true
+      },
+      {
+        "name": "API-A / Key-2",
+        "base_url": "https://api-a.example/v1",
+        "api_key_env": "API_A_KEY_2",
+        "weight": 1,
+        "priority": 0,
+        "unit_cost": 1
+      },
+      {
+        "name": "API-B / backup",
+        "base_url": "https://api-b.example/v1",
+        "api_key_env": "API_B_KEY",
+        "model": "provider-image-model",
+        "weight": 1,
+        "priority": 1,
+        "unit_cost": 2
+      }
+    ]
+  },
+  "routing_report": "D:/images/routing-report.json"
+}
+```
+
+`model` 留空时继承任务模型，图像参数始终继承主任务。无图绘制时还需启用
+`memestudio.prompt-draw`，多源队列还需启用 `memestudio.batch-convert`。
+最多 64 个渠道；权重 1–10000、优先级 0–99、单价 0.000001–1000000，
+冷却 1–3600 秒。同接口和 Key 的重复项被拒绝。URL 不允许查询参数或内嵌凭据；
+认证使用 Bearer Key，HTTPS 必需（本机模拟服务除外）。
+
+可选 `routing_report` 导出请求数、成功/失败数、耗时、估算花销和冷却/停用状态，
+任务成功或失败时均写入。费用只累计成功请求的配置单价，不等于实际账单。
+密钥、密文及密钥指纹均不进入缓存；渠道池配置参与缓存标识，
+切换 Key 不会清空已完成图像，修改权重、渠道或模型会使用新缓存。
+GUI 的加密凭据只能由当前 Windows 用户解密；CLI 只读取环境变量。
+每次新任务重置路由健康和份额统计，同一多源批次共享一个路由器。
 
 ## API 参数支持测试
 

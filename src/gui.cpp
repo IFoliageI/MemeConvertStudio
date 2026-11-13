@@ -3,6 +3,7 @@
 #include "presets.hpp"
 #include "batch.hpp"
 #include "api_probe.hpp"
+#include "api_routing.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -30,7 +31,7 @@ enum Id {
     Generate, CancelJob, SourceTab, ResultTab, Play, Timeline, OpenResult, OpenFolder,
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
     GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
-    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry
+    SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry, RoutingEntry
 };
 struct State;
 struct View {
@@ -68,6 +69,8 @@ struct State {
     std::vector<std::string> enabledPlugins;
     std::shared_ptr<Plugins> plugins;
     UpscaleOptions upscale;
+    RoutingOptions routing;
+    std::shared_ptr<ApiRouter> lastRouter;
     Crop crop;
     View views[3];
     int frame = 0, elapsed = 0, scroll = 0;
@@ -661,6 +664,7 @@ static void saveSettings(State& state) {
     if (state.checked(Remember)) data["encrypted_key"] = protect(state.text(state.get(Key)));
     data["enabled_plugins"] = state.enabledPlugins;
     data["upscale"] = upscaleJson(state.upscale);
+    data["api_routing"] = routingJson(state.routing, true);
     writeJson(settingsPath(), data);
 }
 static void loadSettings(State& state) {
@@ -684,6 +688,7 @@ static void loadSettings(State& state) {
             state.set(state.get(Key), unprotect(data["encrypted_key"].get<std::string>()));
         state.enabledPlugins = data.value("enabled_plugins", std::vector<std::string>{});
         if (data.contains("upscale")) state.upscale = upscaleOptions(data["upscale"]);
+        if (data.contains("api_routing")) state.routing = routingOptions(data["api_routing"], true);
     } catch (const std::exception& error) {
         state.logLine(L"读取设置失败：" + wide(error.what()));
     }
@@ -808,12 +813,14 @@ static void dropFiles(State& state, HDROP drop, int kind) {
 }
 static void start(State& state, const Job* refinement = nullptr);
 static void startApiParameterTest(State& state);
+static void configureRouting(State& state);
 static void updatePluginEntries(State& state) {
     int x = 380;
     for (const auto& [id, plugin] : {
         std::pair{RefineEntry, "memestudio.local-redraw"},
         std::pair{DrawingEntry, "memestudio.prompt-draw"},
-        std::pair{ApiTestEntry, "memestudio.api-parameter-test"}}) {
+        std::pair{ApiTestEntry, "memestudio.api-parameter-test"},
+        std::pair{RoutingEntry, "memestudio.api-load-balancing"}}) {
         auto entry = GetDlgItem(state.window, id);
         bool loaded = state.pluginEnabled(plugin);
         if (loaded) {
@@ -997,6 +1004,11 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
                 EndDialog(window, IDOK);
                 return TRUE;
             }
+            if (result.value("action", "") == "api_routing") {
+                if (info.id != "memestudio.api-load-balancing") throw Error("仅 API 均衡插件可启动路由配置");
+                configureRouting(state);
+                return TRUE;
+            }
             if (result.value("action", "") == "refine") {
                 Job job; job.source = state.resultPath;
                 if (editRefinement(state.instance, window, job, false)) {
@@ -1128,6 +1140,17 @@ static void start(State& state, const Job* refinement) {
     try { job.provider.extra = Json::parse(utf8(state.text(state.get(Extra)))); }
     catch (...) { throw Error("扩展参数不是有效 JSON"); }
     if (!job.provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
+    if (state.pluginEnabled("memestudio.api-load-balancing") && state.routing.enabled) {
+        auto logger = [window = state.window](const std::wstring& message) {
+            auto event = std::make_unique<Progress>(); event->message = message;
+            if (PostMessageW(window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(event.get()))) event.release();
+        };
+        auto router = std::make_shared<ApiRouter>(state.routing, job.provider, logger);
+        auto first = std::find_if(state.routing.channels.begin(), state.routing.channels.end(),
+            [](const auto& channel) { return channel.enabled; });
+        job.provider.baseUrl = first->baseUrl; job.provider.key = first->key;
+        job.provider.router = router; state.lastRouter = router;
+    }
     if (job.provider.key.empty()) throw Error("请填写供应商 API Key");
     // Validate request shape before starting work or asking to replace an output.
     if (job.generate && job.styles.empty()) {
@@ -1221,6 +1244,33 @@ static void startApiParameterTest(State& state) {
 
     showParameterProbe(state.instance, state.window, provider, state.source, state.character, state.crop);
 }
+static void configureRouting(State& state) {
+    if (state.busy || !state.pluginEnabled("memestudio.api-load-balancing")) return;
+    Job input;
+    input.source = state.source; input.character = state.character; input.crop = state.crop;
+    input.styles = state.stylePaths; input.instruction = state.text(state.instruction);
+    input.preserveText = state.checked(PreserveText);
+    auto& provider = input.provider;
+    provider.baseUrl = state.text(state.get(BaseUrl)); provider.key = state.text(state.get(Key));
+    provider.model = utf8(state.text(state.get(Model))); provider.quality = utf8(state.text(state.get(Quality)));
+    provider.size = utf8(state.text(state.get(Size))); provider.imageField = utf8(state.text(state.get(ImageField)));
+    provider.complexity = utf8(state.text(state.get(Complexity)));
+    provider.outputFormat = utf8(state.text(state.get(OutputFormat)));
+    if (provider.quality == utf8(L"不发送")) provider.quality.clear();
+    if (provider.size == utf8(L"不发送")) provider.size.clear();
+    if (provider.complexity == utf8(L"不发送")) provider.complexity.clear();
+    if (provider.outputFormat == utf8(L"不发送")) provider.outputFormat.clear();
+    if ((provider.outputFormat == "jpeg" || provider.outputFormat == "webp") &&
+        state.text(state.get(Compression)) != L"不发送") provider.compression = state.number(Compression, 0, 100);
+    provider.stream = state.checked(Streaming);
+    if (provider.stream) provider.partialImages = state.number(PartialImages, 1, 3);
+    provider.timeoutSeconds = state.number(Timeout, 5, 3600);
+    provider.extra = Json::parse(utf8(state.text(state.get(Extra))));
+    provider.router = state.lastRouter;
+    if (editApiRouting(state.instance, state.window, state.routing, input)) {
+        saveSettings(state); state.logLine(L"API 均衡与灾备配置已保存，下次生成任务生效");
+    }
+}
 static void layout(State& state) {
     RECT rect; GetClientRect(state.window, &rect);
     int width = rect.right, height = rect.bottom, left = 258, right = 332;
@@ -1301,6 +1351,7 @@ static void initialize(State& state) {
     button(RefineEntry, L"局部重绘…", 380, 15, 120);
     button(DrawingEntry, L"无图绘制…", 510, 15, 120);
     button(ApiTestEntry, L"API 参数测试…", 640, 15, 120);
+    button(RoutingEntry, L"API 均衡灾备…", 770, 15, 120);
     state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
         WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
     ShowWindow(state.resultChoice, SW_HIDE);
@@ -1361,6 +1412,7 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == RoutingEntry && !state.busy) { configureRouting(state); return; }
     if (id == ApiTestEntry && !state.busy) { startApiParameterTest(state); return; }
     if (id == DrawingEntry && !state.busy) {
         if (!state.plugins) return;
@@ -1710,6 +1762,13 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
                 .value("action", "") != "api_parameter_test") throw Error("API test plugin entry failed");
         applyPlugins(state, {});
         if (visible(ApiTestEntry)) throw Error("API test entry visible after unloading");
+        if (visible(RoutingEntry)) throw Error("Routing entry visible without plugin");
+        applyPlugins(state, {"memestudio.api-load-balancing"});
+        if (!visible(RoutingEntry) ||
+            state.plugins->command("memestudio.api-load-balancing", "configure-routing", Json::object(), window)
+                .value("action", "") != "api_routing") throw Error("Routing plugin entry failed");
+        applyPlugins(state, {});
+        if (visible(RoutingEntry)) throw Error("Routing entry visible after unloading");
         auto savedInstruction = state.text(state.instruction);
         applyPlugins(state, {"memestudio.example"});
         if (state.plugins->fingerprint().size() != 1 ||
@@ -1861,6 +1920,22 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
                     L"ui-api-parameter-test.png", dialog);
             });
         report["api_parameter_test_dialog"] = "passed";
+        RoutingOptions routeOptions;
+        Job compareInput; compareInput.provider.model = "gpt-image-test"; compareInput.provider.key = L"ui-test-key";
+        compareInput.source = demo / L"source.png"; compareInput.character = demo / L"character.png";
+        compareInput.styles = {demo / L"style.png"};
+        compareInput.instruction = L"保留夸张表情与背景，统一线条和配色。";
+        if (!editApiRouting(instance, window, routeOptions, compareInput, true, [&](HWND dialog) {
+            RECT bounds{}; GetWindowRect(dialog, &bounds);
+            snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top, L"ui-api-routing.png", dialog);
+        }) || !routeOptions.enabled || routeOptions.channels.size() != 2)
+            throw Error("Routing configuration capture failed");
+        routeOptions.channels[1].model = "comparison-model-b";
+        showApiComparison(instance, window, routeOptions, compareInput, true, [&](HWND dialog) {
+            RECT bounds{}; GetWindowRect(dialog, &bounds);
+            snapshot(bounds.right - bounds.left, bounds.bottom - bounds.top, L"ui-api-comparison.png", dialog);
+        });
+        report["api_routing_dialogs"] = "passed (fixture previews; no network)";
         report["precision_wheel_messages"] = "passed";
         auto preview = std::make_unique<Progress>();
         preview->frame = 0; preview->total = 3; preview->partial = 0;

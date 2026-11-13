@@ -12,7 +12,7 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
 
-完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有六个精简插件分支；它们不包含应用宿主源码或其他插件：
+完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有七个精简插件分支；它们不包含应用宿主源码或其他插件：
 
 - [`plugin-example`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-example)：示例提示词插件。
 - [`plugin-local-redraw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-local-redraw)：局部重绘命令插件。
@@ -20,6 +20,7 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 - [`plugin-batch-convert`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-batch-convert)：多源图片和 GIF 批量转换插件。
 - [`plugin-prompt-draw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-prompt-draw)：纯提示词及可选画风参考的无图绘制插件。
 - [`plugin-api-parameter-test`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-parameter-test)：逐项探测模型、端点及已配置图像参数的支持情况。
+- [`plugin-api-load-balancing`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-load-balancing)：多 API / Key 权重均衡、分级灾备及效果对比。
 
 每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1`、专属 README 和自动编译工作流。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分、批量转换、无图绘制和参数测试插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
 
@@ -54,6 +55,46 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 局部重绘、无图绘制与参数测试显示顶部入口，批量转换显示目录按钮和素材翻页。
 停用或加载失败后隐藏对应控件，顶部入口自动紧凑排列；
 任务执行时已加载的入口保持显示并暂时禁用。
+
+### API 负载均衡与灾备
+
+在插件管理勾选并应用“API 负载均衡与灾备”，顶部显示“API 均衡灾备…”。
+每个渠道对应一组 Base URL、Key、可选模型、权重、优先级和估算单价。
+同一 API 的多个 Key 分别添加为渠道即可；可以从主界面带入地址、模型和 Key。
+编辑字段后点击“添加为新渠道”或“更新选中渠道”，最后保存整个配置。
+勾选“生成任务启用路由”后，人物替换、GIF、局部重绘、无图绘制和批量转换
+都通过渠道池发起请求。停用插件或关闭路由后恢复主界面单供应商设置。
+
+同优先级采用平滑加权轮询，例如 3:1 长期分配约 75%:25% 的请求。
+优先级越小越先使用，较大的数字表示备用层；先耗尽当前层可用渠道，再使用备用层。
+默认比例按请求数量计算；启用“按估算花销比例”后，以“权重 ÷ 单次估算费用”
+分配请求，例如单价 1 和 3、权重同为 1 时，请求约 3:1、成功请求的估算花销约 1:1。
+所有单价应使用同一种货币和计量单位。这是估算，并非读取供应商账单或预算上限；
+失败计费、输入大小、模型用量和动态价格会造成差异。现有任务仍串行执行，
+分流不增加并发。每个未命中缓存的图像请求或 GIF 帧分配一次渠道，
+同一批任务共享调度状态；缓存命中不占用份额。
+
+灾备默认对 HTTP 401/403 停用该渠道至本次任务结束，对 429 或明确的 DNS/连接建立失败
+冷却指定秒数后恢复资格；
+不等待冷却，所有渠道都不可用时立即停止。可选允许 502/503/504 切换，
+此选项可能使同一图像被多次计费，默认关闭。
+超时、连接中断、流式错误、成功响应解码失败、成品下载失败及其他 HTTP 状态会停止，
+保留已完成缓存；取消不发起灾备。每次图像最多尝试每个渠道一次。
+不同渠道可覆盖模型，但所有渠道沿用同一组图像参数，不自动删改不兼容参数。
+跨模型处理 GIF 可能产生画风漂移，宜先对比效果，或把不同模型放入备用层。
+
+“效果对比…”可选择当前表情首帧及人物参考，或纯提示词和可选画风参考。
+对加入对比的启用渠道按 API / 模型去重，每组只发一次请求，不灾备或重试。
+窗口在开始前显示请求数，结果支持左右两栏切换、耗时和估算单价对照；
+原尺寸 PNG 与 `report.json` 写入系统“图片”目录下的新建 `MemeStudio-compare-<ID>` 文件夹。
+各渠道采用相同提示词和上传图像，不包含其他插件提示词或超分处理；
+随机生成结果不能作为画质或性能的严格基准。
+
+生成后重新打开配置可查看各渠道请求数、成功/失败、累计耗时、估算花销及健康状态。
+Key 默认只在内存中保留；勾选“本机加密记住 Keys”后用 Windows DPAPI 保存，
+取消该勾选并保存会移除已保存的 Key。渠道配置与主界面的“记住 Key”独立。
+密钥不传入插件 DLL，也不写入报告和帧缓存。CLI 配置见 [PLUGINS.md](PLUGINS.md)。
+需要包含路由宿主服务的新版本，仅安装 DLL 不会为旧主程序增加该功能。
 
 ### 无图绘制
 
@@ -236,7 +277,7 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 其中包含完整应用包 `MemeStudio-Windows-x64.zip` 和插件包 `MemeStudio-Plugins.zip`。
 构建产物保存 14 天。同一分支新提交会取消旧构建。
 
-六个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
+七个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
 只构建该分支对应插件。下载其 `MemeStudio-Plugin-Windows-x64`，
 将解压后的 `plugins` 目录放到兼容的主程序旁。工作流不创建 GitHub Release。
 

@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "memestudio.api-load-balancing",
+  "name": "API 负载均衡与灾备",
+  "version": "1.0.0",
+  "description": "多 API / 多 Key 加权请求及估算花销均衡、分级灾备、渠道统计与并排效果对比。",
+  "library": "api-load-balancing.dll",
+  "commands": [
+    {"id": "configure-routing", "title": "配置 API 均衡、灾备与效果对比…"}
+  ]
+}

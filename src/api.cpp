@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "api_routing.hpp"
 #include <winhttp.h>
 #include <algorithm>
 #include <array>
@@ -181,15 +182,17 @@ static Response request(const std::wstring& url, const wchar_t* method, const st
     WinHttpSetOption(handle, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof(redirects));
     DWORD disabled = WINHTTP_DISABLE_COOKIES;
     WinHttpSetOption(handle, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled));
-    auto fail = [&] {
+    auto fail = [&](bool connecting = false) {
         DWORD error = GetLastError(); cancel.verify();
+        if (connecting && (error == ERROR_WINHTTP_NAME_NOT_RESOLVED || error == ERROR_WINHTTP_CANNOT_CONNECT))
+            throw ApiConnectionError("未能建立供应商连接，Windows 错误 " + std::to_string(error));
         if (error == ERROR_WINHTTP_TIMEOUT)
             throw Error("请求超时。任务已保留；供应商可能已计费，请确认后再续作。");
         throw Error("网络请求失败，Windows 错误 " + std::to_string(error));
     };
     if (!WinHttpSendRequest(handle, headers.c_str(), static_cast<DWORD>(headers.size()),
         body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<BYTE*>(body.data()),
-        static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0)) fail();
+        static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0)) fail(true);
     if (!WinHttpReceiveResponse(handle, nullptr)) fail();
     DWORD status = 0, length = sizeof(status);
     if (!WinHttpQueryHeaders(handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -425,6 +428,10 @@ static Image imageRequest(const Provider& provider, const std::wstring& url, con
         body.data, provider.timeoutSeconds, cancel, provider.stream ?
             std::function<void(const char*, size_t)>([&](const char* bytes, size_t size) { stream.feed(bytes, size); }) :
             std::function<void(const char*, size_t)>{});
+    if (response.status < 200 || response.status >= 300) {
+        try { jsonResponse(response, provider); }
+        catch (const std::exception& error) { throw ApiHttpError(response.status, error.what()); }
+    }
     if (response.streamed) return stream.finish();
     auto result = jsonResponse(response, provider);
     if (!result.contains("data") || !result["data"].is_array() || result["data"].empty())
@@ -435,7 +442,9 @@ static Image imageRequest(const Provider& provider, const std::wstring& url, con
     if (item.contains("url") && item["url"].is_string()) {
         auto imageUrl = item["url"].get<std::string>();
         if (imageUrl.rfind("data:", 0) == 0) return decode(unbase64(imageUrl));
-        auto download = request(wide(imageUrl), L"GET", L"", {}, provider.timeoutSeconds, cancel);
+        Response download;
+        try { download = request(wide(imageUrl), L"GET", L"", {}, provider.timeoutSeconds, cancel); }
+        catch (const ApiConnectionError& error) { throw Error("生成图片下载失败：" + std::string(error.what())); }
         if (download.status != 200) throw Error("生成图片下载失败，HTTP " + std::to_string(download.status));
         return decode(download.data);
     }
@@ -443,10 +452,16 @@ static Image imageRequest(const Provider& provider, const std::wstring& url, con
 }
 Image edit(const Provider& provider, const std::string& text, const std::vector<Upload>& images, Cancel& cancel,
     const std::function<void(const Image&, int)>& preview) {
+    if (provider.router) return provider.router->invoke(provider, cancel, [&](const Provider& target) {
+        return edit(target, text, images, cancel, preview);
+    });
     return imageRequest(provider, editUrl(provider.baseUrl), multipart(provider, text, images), cancel, preview);
 }
 Image generate(const Provider& provider, const std::string& text, const std::vector<Upload>& styles,
     Cancel& cancel, const std::function<void(const Image&, int)>& preview) {
+    if (provider.router) return provider.router->invoke(provider, cancel, [&](const Provider& target) {
+        return generate(target, text, styles, cancel, preview);
+    });
     if (!styles.empty()) return edit(provider, text, styles, cancel, preview);
     auto serialized = generationBody(provider, text).dump();
     return imageRequest(provider, generationUrl(provider.baseUrl),

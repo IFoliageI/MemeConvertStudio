@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "api_routing.hpp"
 #include "plugins.hpp"
 #include "upscale.hpp"
 #include <algorithm>
@@ -159,6 +160,7 @@ static void runSingleJob(const Job& job, Cancel& cancel, const Reporter& report,
     if (job.copyIndex) manifest["variation"] = job.copyIndex;
     if (job.plugins && !job.plugins->fingerprint(true).empty()) manifest["plugins"] = job.plugins->fingerprint(true);
     if (job.upscale.input) manifest["upscale_input"] = upscaler->fingerprint();
+    if (job.provider.router) manifest["api_routing"] = routingFingerprint(job.provider);
     auto serialized = manifest.dump();
     std::string signature = digest(Bytes(serialized.begin(), serialized.end()));
     fs::path cache = output; cache += L".memestudio";

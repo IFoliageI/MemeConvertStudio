@@ -56,6 +56,7 @@ Bytes png(const Image& image);
 void savePng(const fs::path& path, const Image& image);
 void saveGif(const fs::path& path, const std::vector<Frame>& frames, UINT loop);
 
+class ApiRouter;
 struct Provider {
     std::wstring baseUrl = L"https://api.openai.com/v1";
     std::wstring key;
@@ -69,7 +70,13 @@ struct Provider {
     int partialImages = 2;
     Json extra = Json::object();
     int timeoutSeconds = 600;
+    std::shared_ptr<ApiRouter> router;
 };
+struct ApiHttpError : Error {
+    DWORD status;
+    ApiHttpError(DWORD code, const std::string& message) : Error(message), status(code) {}
+};
+struct ApiConnectionError : Error { using Error::Error; };
 struct Cancel {
     std::atomic_bool stopped{false};
     std::mutex mutex;

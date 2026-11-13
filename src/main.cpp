@@ -2,6 +2,7 @@
 #include "plugins.hpp"
 #include "batch.hpp"
 #include "api_probe.hpp"
+#include "api_routing.hpp"
 #include <shellapi.h>
 #include <iostream>
 #include <algorithm>
@@ -18,6 +19,8 @@ int wmain(int argc, wchar_t** argv) {
             exitCode = networkTest(argv[2], argv[3]);
         } else if (argc >= 4 && std::wstring(argv[1]) == L"--parameter-probe-test") {
             exitCode = parameterProbeTest(argv[2], argv[3]);
+        } else if (argc >= 4 && std::wstring(argv[1]) == L"--routing-test") {
+            exitCode = routingTest(argv[2], argv[3]);
         } else if (argc >= 4 && std::wstring(argv[1]) == L"--inspect") {
             auto animation = decode(fs::path(argv[2]));
             Json info{{"width", animation.frames.front().image.width}, {"height", animation.frames.front().image.height},
@@ -86,6 +89,18 @@ int wmain(int argc, wchar_t** argv) {
                 const auto& crop = config["crop"];
                 job.crop = {crop.at("x"), crop.at("y"), crop.at("width"), crop.at("height")};
             }
+            if (config.contains("api_routing")) {
+                auto options = routingOptions(config["api_routing"], false);
+                if (options.enabled) {
+                    const auto enabled = config.value("plugins", std::vector<std::string>{});
+                    if (std::find(enabled.begin(), enabled.end(), "memestudio.api-load-balancing") == enabled.end())
+                        throw Error("请先加载 API 负载均衡与灾备插件");
+                    auto router = std::make_shared<ApiRouter>(options, job.provider);
+                    auto first = std::find_if(options.channels.begin(), options.channels.end(),
+                        [](const auto& channel) { return channel.enabled; });
+                    job.provider.baseUrl = first->baseUrl; job.provider.key = first->key; job.provider.router = router;
+                }
+            }
             Cancel cancel;
             auto reporter = [&](const Progress& progress) {
                 if (progress.preview && config.contains("preview_file"))
@@ -96,6 +111,7 @@ int wmain(int argc, wchar_t** argv) {
                          {"frame", progress.frame}, {"partial_image_index", progress.partial},
                          {"copy_index", progress.copy}, {"count", progress.copies}});
             };
+            auto run = [&] {
             if (config.contains("sources")) {
                 if (job.refine || job.generate) throw Error("源素材队列仅支持人物替换模式");
                 const auto enabled = config.value("plugins", std::vector<std::string>{});
@@ -108,6 +124,15 @@ int wmain(int argc, wchar_t** argv) {
                 std::vector<fs::path> completed;
                 runSourceJobs(sources, jobs, cancel, reporter, completed);
             } else runJob(job, cancel, reporter);
+            };
+            try { run(); }
+            catch (...) {
+                if (job.provider.router && config.contains("routing_report"))
+                    writeJson(wide(config["routing_report"].get<std::string>()), job.provider.router->statistics());
+                throw;
+            }
+            if (job.provider.router && config.contains("routing_report"))
+                writeJson(wide(config["routing_report"].get<std::string>()), job.provider.router->statistics());
         } else {
             exitCode = runGui(GetModuleHandleW(nullptr), argc >= 3 && std::wstring(argv[1]) == L"--demo" ? argv[2] : fs::path{});
         }
