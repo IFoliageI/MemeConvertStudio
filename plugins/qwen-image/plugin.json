@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "memestudio.qwen-image",
+  "name": "本地模型支持 - Qwen-Image",
+  "version": "1.0.0",
+  "description": "配置本地 Qwen-Image 推理环境、模型驻留和带 Key 的 OpenAI 兼容服务。",
+  "library": "qwen-image.dll",
+  "commands": [
+    {"id": "configure", "title": "Qwen-Image 环境与本地服务…"},
+    {"id": "stop", "title": "停止本地服务并卸载模型"}
+  ]
+}

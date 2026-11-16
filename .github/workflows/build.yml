@@ -16,7 +16,11 @@ concurrency:
 
 jobs:
   build:
-    name: Windows x64 plugin
+    name: Windows ${{ matrix.architecture }} plugin
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, arm64]
     runs-on: windows-2022
     timeout-minutes: 10
     defaults:
@@ -28,13 +32,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Build standalone plugin
-        run: .\build.ps1
+        run: .\build.ps1 -Architecture ${{ matrix.architecture }}
       - name: Upload plugin
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: MemeStudio-Plugin-Windows-x64
+          name: MemeStudio-Qwen-Plugin-Windows-${{ matrix.architecture }}
           path: |
-            dist/
+            dist/${{ matrix.architecture }}/
             !dist/**/*.obj
             !dist/**/*.lib
             !dist/**/*.exp

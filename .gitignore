@@ -1,0 +1,11 @@
+/build/
+/dist/
+/tmp/
+**/__pycache__/
+**/.env/
+/plugins/qwen-image/runtime/
+**/qwen-settings.json
+**/qwen-settings.tmp
+**/qwen-runtime.log
+**/qwen-ready-*.json
+**/runtime-constraints.txt
