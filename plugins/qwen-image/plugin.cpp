@@ -15,6 +15,7 @@
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
+#include <cstddef>
 
 namespace {
 using Json = nlohmann::json;
@@ -22,6 +23,14 @@ namespace fs = std::filesystem;
 HMODULE module{};
 const MemeStudioHostV1* host{};
 std::string response;
+HWND panel{}, nativePanel{};
+bool asynchronous() {
+    return host && host->struct_size >= offsetof(MemeStudioHostV1, post_action) + sizeof(host->post_action) && host->post_action;
+}
+void closeWindow(HWND window, INT_PTR result) {
+    if (asynchronous()) DestroyWindow(window);
+    else EndDialog(window, result);
+}
 std::wstring wide(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), int(s.size()), nullptr, 0);
     std::wstring out(n, 0);
@@ -281,7 +290,8 @@ INT_PTR CALLBACK nativeOptions(HWND window, UINT message, WPARAM wparam, LPARAM)
             add(L"BUTTON", L"取消", WS_TABSTOP, IDCANCEL, 694, 344, 120, 32);
             return TRUE;
         }
-        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message == WM_NCDESTROY) { if (nativePanel == window) nativePanel = nullptr; return FALSE; }
+        if (message == WM_CLOSE) { closeWindow(window, IDCANCEL); return TRUE; }
         if (message != WM_COMMAND) return FALSE;
         int id = LOWORD(wparam);
         if (id >= BrowseNative && id <= BrowseVision) {
@@ -299,9 +309,9 @@ INT_PTR CALLBACK nativeOptions(HWND window, UINT message, WPARAM wparam, LPARAM)
                 state->config[key] = utf8(text(window, edit++));
             state->config["turbo"] = IsDlgButtonChecked(window, Turbo) == BST_CHECKED;
             state->config["max_vram"] = budget;
-            EndDialog(window, IDOK); return TRUE;
+            closeWindow(window, IDOK); return TRUE;
         }
-        if (id == IDCANCEL) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (id == IDCANCEL) { closeWindow(window, IDCANCEL); return TRUE; }
     } catch (const std::exception& error) {
         MessageBoxW(window, wide(error.what()).c_str(), L"Qwen-Image", MB_OK | MB_ICONERROR);
     }
@@ -418,7 +428,8 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM) {
             fill(window); tick(window); SetTimer(window, 1, 600, nullptr); return TRUE;
         }
         if (message == WM_TIMER) { tick(window); return TRUE; }
-        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message == WM_NCDESTROY) { if (panel == window) panel = nullptr; return FALSE; }
+        if (message == WM_CLOSE) { closeWindow(window, IDCANCEL); return TRUE; }
         if (message == WM_DESTROY) { KillTimer(window, 1); return TRUE; }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wparam)) {
@@ -430,9 +441,14 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM) {
         }
         case GGUFOptions: {
             state->config = controls(window);
+            if (IsWindow(nativePanel)) { SetForegroundWindow(nativePanel); return TRUE; }
             struct Template { DLGTEMPLATE dialog{}; WORD menu = 0, type = 0, title = 0; } resource;
             resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
-            DialogBoxIndirectParamW(module, &resource.dialog, window, nativeOptions, 0);
+            if (asynchronous()) {
+                nativePanel = CreateDialogIndirectParamW(module, &resource.dialog,
+                    GetAncestor(window, GA_ROOTOWNER), nativeOptions, 0);
+                ShowWindow(nativePanel, SW_SHOW);
+            } else DialogBoxIndirectParamW(module, &resource.dialog, window, nativeOptions, 0);
             return TRUE;
         }
         case Install: case Probe: case Start: case InspectModel: {
@@ -465,9 +481,11 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM) {
             response = Json{{"action","qwen_endpoint"}, {"base_url", "http://127.0.0.1:" +
                 std::to_string(state->child.config["port"].get<int>()) + "/v1"},
                 {"key",state->child.config["key"]}, {"model",state->child.config["model_id"]}}.dump();
-            EndDialog(window, IDOK); return TRUE;
-        case IDOK: save(controls(window)); EndDialog(window, IDOK); return TRUE;
-        case IDCANCEL: EndDialog(window, IDCANCEL); return TRUE;
+            if (asynchronous()) host->post_action(host->context, "memestudio.qwen-image", response.c_str());
+            else EndDialog(window, IDOK);
+            return TRUE;
+        case IDOK: save(controls(window)); closeWindow(window, IDOK); return TRUE;
+        case IDCANCEL: closeWindow(window, IDCANCEL); return TRUE;
         }
     } catch (const std::exception& error) {
         MessageBoxW(window, wide(error.what()).c_str(), L"Qwen-Image", MB_OK | MB_ICONERROR);
@@ -495,13 +513,24 @@ const char* MEMESTUDIO_CALL command(const char* id, const char*, void* owner) {
         if (!state) return nullptr;
         if (std::string(id) == "stop") { state->child.stop(); return nullptr; }
         if (std::string(id) != "configure") return nullptr;
+        if (IsWindow(panel)) { ShowWindow(panel, SW_RESTORE); SetForegroundWindow(panel); return nullptr; }
         struct Template { DLGTEMPLATE dialog{}; WORD menu = 0, type = 0, title = 0; } resource;
         resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
+        if (asynchronous()) {
+            panel = CreateDialogIndirectParamW(module, &resource.dialog,
+                GetAncestor(static_cast<HWND>(owner), GA_ROOTOWNER), procedure, 0);
+            ShowWindow(panel, SW_SHOW); return nullptr;
+        }
         DialogBoxIndirectParamW(module, &resource.dialog, static_cast<HWND>(owner), procedure, 0);
         return response.empty() ? nullptr : response.c_str();
     } catch (...) { return nullptr; }
 }
-void MEMESTUDIO_CALL shutdown() { state.reset(); host = nullptr; response.clear(); }
+void MEMESTUDIO_CALL shutdown() {
+    if (IsWindow(nativePanel)) DestroyWindow(nativePanel);
+    if (IsWindow(panel)) DestroyWindow(panel);
+    nativePanel = panel = nullptr;
+    state.reset(); host = nullptr; response.clear();
+}
 const MemeStudioPluginV1 plugin{sizeof(MemeStudioPluginV1), MEMESTUDIO_PLUGIN_ABI, "memestudio.qwen-image",
     initialize, nullptr, nullptr, command, shutdown};
 }

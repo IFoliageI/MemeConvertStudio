@@ -16,10 +16,12 @@ class Plugins {
     struct Module;
     std::vector<std::unique_ptr<Module>> modules;
     std::function<void(const std::wstring&)> logger;
+    std::function<void(const std::string&, const Json&)> action;
     MemeStudioHostV1 host{};
 public:
     Plugins(const std::vector<PluginInfo>& available, const std::vector<std::string>& enabled,
-        std::function<void(const std::wstring&)> log = {});
+        std::function<void(const std::wstring&)> log = {},
+        std::function<void(const std::string&, const Json&)> onAction = {});
     ~Plugins();
     Plugins(const Plugins&) = delete;
     Plugins& operator=(const Plugins&) = delete;

@@ -1,4 +1,5 @@
 #include "upscale.hpp"
+#include "panels.hpp"
 #include <shobjidl.h>
 #include <algorithm>
 
@@ -221,10 +222,10 @@ INT_PTR CALLBACK upscaleProcedure(HWND window, UINT message, WPARAM wparam, LPAR
             SendDlgItemMessageW(window, Scale, CB_SETCURSEL, 2, 0);
             SendMessageW(window, WM_COMMAND, IDOK, 0); return TRUE;
         }
-        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message == WM_CLOSE) { finishPanel(window, IDCANCEL); return TRUE; }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wparam)) {
-        case IDCANCEL: EndDialog(window, IDCANCEL); return TRUE;
+        case IDCANCEL: finishPanel(window, IDCANCEL); return TRUE;
         case ChooseExe: case ChooseModels: {
             ComPtr<IFileOpenDialog> picker;
             check(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&picker)), "Choose Waifu2x");
@@ -250,23 +251,33 @@ INT_PTR CALLBACK upscaleProcedure(HWND window, UINT message, WPARAM wparam, LPAR
             value.scale = integer(window, Scale); value.noise = integer(window, Noise);
             value.tile = integer(window, Tile); value.gpu = integer(window, Gpu);
             value.timeout = integer(window, Timeout); validate(value);
-            dialog->options = value; dialog->accepted = true; EndDialog(window, IDOK); return TRUE;
+            dialog->options = value; dialog->accepted = true; finishPanel(window, IDOK); return TRUE;
         }
         }
     } catch (const std::exception& error) {
         if (dialog && dialog->capture) {
-            dialog->failure = error.what(); EndDialog(window, IDABORT); return TRUE;
+            dialog->failure = error.what(); finishPanel(window, IDABORT); return TRUE;
         }
         MessageBoxW(window, wide(error.what()).c_str(), L"Waifu2x", MB_OK | MB_ICONERROR);
     }
     return FALSE;
 }
 }
-bool editUpscale(HINSTANCE instance, HWND owner, UpscaleOptions& options, bool capture) {
-    UpscaleDialog editor; editor.instance = instance; editor.options = options; editor.capture = capture;
+bool editUpscale(HINSTANCE instance, HWND owner, UpscaleOptions& options, bool capture,
+    const std::function<void(const UpscaleOptions&)>& completed) {
+    if (!capture && activatePanel("upscale")) return false;
+    auto storage = std::make_shared<UpscaleDialog>(); auto& editor = *storage;
+    editor.instance = instance; editor.options = options; editor.capture = capture;
     struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
     resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER;
     resource.dialog.cx = 420; resource.dialog.cy = 330;
+    if (!capture) {
+        openPanel("upscale", instance, owner, &resource.dialog, upscaleProcedure,
+            reinterpret_cast<LPARAM>(&editor), storage, [storage, completed](INT_PTR result) {
+                if (result == IDOK && completed) completed(storage->options);
+            });
+        return false;
+    }
     auto result = DialogBoxIndirectParamW(instance, &resource.dialog, owner, upscaleProcedure,
         reinterpret_cast<LPARAM>(&editor));
     if (result == -1) throw Error("无法打开 Waifu2x 设置");

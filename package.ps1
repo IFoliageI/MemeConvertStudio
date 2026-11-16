@@ -1,11 +1,16 @@
 param(
     [ValidateSet("x64", "arm64")][string]$Architecture = "x64",
-    [string]$Executable = ""
+    [string]$Executable = "",
+    [string]$BinaryDirectory = ""
 )
 $ErrorActionPreference = "Stop"
 $project = $PSScriptRoot
+$requestedBinary = $BinaryDirectory
 if ($Architecture -eq "x64") { $binaryDirectory = Join-Path $project "bin" }
 else { $binaryDirectory = Join-Path $project "bin\arm64" }
+if ($requestedBinary) {
+    $binaryDirectory = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($requestedBinary)) { $requestedBinary } else { Join-Path $project $requestedBinary }))
+}
 if (!$Executable) {
     $executableName = if ($Architecture -eq "x64") { "MemeStudio.exe" } else { "MemeStudio-arm64.exe" }
     $Executable = Join-Path $binaryDirectory $executableName

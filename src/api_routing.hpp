@@ -9,6 +9,8 @@ struct ApiChannel {
     int weight = 1, priority = 0;
     double unitCost = 1;
     bool enabled = true, compare = true;
+    bool modelsConfigured = false;
+    std::vector<std::string> availableModels, enabledModels;
 };
 struct RoutingOptions {
     bool enabled = false, spending = false, failover = true, serviceFailover = false, remember = false;
@@ -53,11 +55,15 @@ public:
 Provider channelProvider(const Provider& base, const ApiChannel& channel);
 Json routingFingerprint(const Provider& provider);
 bool gatewayActive(bool pluginLoaded, const RoutingOptions& options);
+struct PoolModel { std::string id; std::wstring label; };
+std::vector<PoolModel> poolModels(const RoutingOptions& options, const std::string& inherited);
+bool channelSupports(const ApiChannel& channel, const std::string& model);
 std::string routingRedact(std::string text, const RoutingOptions& options);
 std::vector<size_t> comparisonChannels(const RoutingOptions& options, const Provider& base = {});
 void showApiComparison(HINSTANCE instance, HWND owner, const RoutingOptions& options, const Job& input,
     bool capture = false, const std::function<void(HWND)>& snapshot = {});
 bool editApiRouting(HINSTANCE instance, HWND owner, RoutingOptions& options, const Job& input,
-    bool capture = false, const std::function<void(HWND)>& snapshot = {});
+    bool capture = false, const std::function<void(HWND)>& snapshot = {},
+    const std::function<void(const RoutingOptions&)>& completed = {});
 int routingTest(const fs::path& directory, const std::wstring& base);
 }

@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "panels.hpp"
 #include <commctrl.h>
 #include <shobjidl.h>
 #include <windowsx.h>
@@ -240,7 +241,7 @@ static INT_PTR CALLBACK editorProcedure(HWND window, UINT message, WPARAM wparam
             captureEditor(*editor);
             SendMessageW(window, WM_COMMAND, IDOK, 0); return TRUE;
         }
-        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message == WM_CLOSE) { finishPanel(window, IDCANCEL); return TRUE; }
         if (message == WM_HSCROLL) {
             editor->frame = int(SendDlgItemMessageW(window, Frames, TBM_GETPOS, 0, 0));
             InvalidateRect(editor->canvas, nullptr, FALSE);
@@ -249,7 +250,7 @@ static INT_PTR CALLBACK editorProcedure(HWND window, UINT message, WPARAM wparam
         }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wparam)) {
-        case IDCANCEL: EndDialog(window, IDCANCEL); return TRUE;
+        case IDCANCEL: finishPanel(window, IDCANCEL); return TRUE;
         case SourceFile: {
             auto paths = pick(window, false);
             if (!paths.empty()) load(*editor, paths.front()); return TRUE;
@@ -290,23 +291,33 @@ static INT_PTR CALLBACK editorProcedure(HWND window, UINT message, WPARAM wparam
                 throw Error("请填写本次重绘的修改要求");
             editor->value.output = text(window, OutputPath);
             if (editor->value.output.empty()) throw Error("请选择保存路径");
-            editor->accepted = true; EndDialog(window, IDOK); return TRUE;
+            editor->accepted = true; finishPanel(window, IDOK); return TRUE;
         }
     } catch (const std::exception& error) {
         if (editor && editor->capture) {
-            editor->failure = error.what(); EndDialog(window, IDABORT); return TRUE;
+            editor->failure = error.what(); finishPanel(window, IDABORT); return TRUE;
         }
         MessageBoxW(window, wide(error.what()).c_str(), L"局部重绘", MB_OK | MB_ICONERROR);
     }
     return FALSE;
 }
 }
-bool editRefinement(HINSTANCE instance, HWND owner, Job& job, bool capture) {
-    Editor editor; editor.instance = instance; editor.value.source = job.source; editor.capture = capture;
+bool editRefinement(HINSTANCE instance, HWND owner, Job& job, bool capture,
+    const std::function<void(const Job&)>& completed) {
+    if (!capture && activatePanel("refine")) return false;
+    auto storage = std::make_shared<Editor>(); auto& editor = *storage;
+    editor.instance = instance; editor.value.source = job.source; editor.capture = capture;
     editor.value.refine = true; editor.value.maxFrames = 0;
     struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
     resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
     resource.dialog.cx = 580; resource.dialog.cy = 420;
+    if (!capture) {
+        openPanel("refine", instance, owner, &resource.dialog, editorProcedure,
+            reinterpret_cast<LPARAM>(&editor), storage, [storage, completed](INT_PTR result) {
+                if (result == IDOK && completed) completed(storage->value);
+            });
+        return false;
+    }
     auto result = DialogBoxIndirectParamW(instance, &resource.dialog, owner, editorProcedure,
         reinterpret_cast<LPARAM>(&editor));
     if (result == -1) throw Error("无法打开局部重绘窗口");

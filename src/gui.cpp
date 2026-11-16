@@ -4,6 +4,7 @@
 #include "batch.hpp"
 #include "api_probe.hpp"
 #include "api_routing.hpp"
+#include "panels.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -21,6 +22,7 @@
 namespace studio {
 namespace {
 constexpr UINT WM_PROGRESS = WM_APP + 1, WM_FINISHED = WM_APP + 2;
+constexpr UINT WM_PLUGIN_ACTION = WM_APP + 121;
 constexpr int settingsHeight = 1210;
 constexpr int minimumLeftWidth = 242, minimumRightWidth = 332, minimumCanvasWidth = 400;
 constexpr COLORREF ink = RGB(34, 39, 43), muted = RGB(104, 113, 120);
@@ -82,6 +84,7 @@ struct State {
     std::shared_ptr<Plugins> plugins;
     UpscaleOptions upscale;
     RoutingOptions routing;
+    std::vector<PoolModel> modelChoices;
     std::shared_ptr<ApiRouter> lastRouter;
     Crop crop;
     View views[3];
@@ -768,6 +771,31 @@ static void createSettings(State& state) {
     control(state, state.settings, L"BUTTON", L"插件管理…", WS_TABSTOP | BS_PUSHBUTTON,
         PluginManage, 16, 1132, 292, 32, true);
 }
+static std::string selectedModel(const State& state) {
+    auto label = state.text(state.get(Model));
+    auto index = SendMessageW(state.get(Model), CB_GETCURSEL, 0, 0);
+    if (index >= 0 && size_t(index) < state.modelChoices.size() && state.modelChoices[index].label == label)
+        return state.modelChoices[index].id;
+    auto found = std::find_if(state.modelChoices.begin(), state.modelChoices.end(),
+        [&](const auto& item) { return item.label == label; });
+    if (found != state.modelChoices.end() &&
+        std::count_if(state.modelChoices.begin(), state.modelChoices.end(), [&](const auto& item) { return item.label == label; }) == 1)
+        return found->id;
+    return utf8(label);
+}
+static void refreshPoolModels(State& state) {
+    auto model = selectedModel(state);
+    state.modelChoices = state.gatewayEnabled() ? poolModels(state.routing, model) : std::vector<PoolModel>{};
+    SendMessageW(state.get(Model), CB_RESETCONTENT, 0, 0);
+    int selected = -1;
+    for (const auto& choice : state.modelChoices) {
+        auto index = int(SendMessageW(state.get(Model), CB_ADDSTRING, 0, LPARAM(choice.label.c_str())));
+        if (choice.id == model) selected = index;
+    }
+    if (selected >= 0) SendMessageW(state.get(Model), CB_SETCURSEL, selected, 0);
+    else if (state.gatewayEnabled() && !state.modelChoices.empty()) SendMessageW(state.get(Model), CB_SETCURSEL, 0, 0);
+    else state.set(state.get(Model), wide(model));
+}
 static void updateProviderControls(State& state) {
     auto format = state.text(state.get(OutputFormat));
     EnableWindow(state.get(Compression), !state.busy && (format == L"jpeg" || format == L"webp"));
@@ -783,7 +811,7 @@ static void updateProviderControls(State& state) {
         InvalidateRect(state.get(id), nullptr, TRUE);
     }
     EnableWindow(state.get(Remember), !state.busy && !gateway);
-    EnableWindow(state.get(FetchModels), !state.busy && !gateway);
+    EnableWindow(state.get(FetchModels), !state.busy);
 }
 static void saveSettings(State& state) {
     if (state.demo) return;
@@ -791,6 +819,7 @@ static void saveSettings(State& state) {
     for (int id : {BaseUrl, Model, Quality, Size, ImageField, Extra, Timeout, Stride, MaxFrames,
         Complexity, OutputFormat, Compression, PartialImages, GenerationCount})
         data[std::to_string(id)] = utf8(state.text(state.get(id)));
+    data[std::to_string(Model)] = selectedModel(state);
     for (int id : {Consistency, PreserveText, Resume, Remember, Streaming}) data[std::to_string(id)] = state.checked(id);
     if (state.checked(Remember)) data["encrypted_key"] = protect(state.text(state.get(Key)));
     data["enabled_plugins"] = state.enabledPlugins;
@@ -961,6 +990,7 @@ static void applyQwenEndpoint(State& state, const Json& result) {
             [&](const auto& channel) { return channel.name == "Local Qwen-Image"; });
         ApiChannel channel; channel.name = "Local Qwen-Image"; channel.baseUrl = url;
         channel.key = key; channel.model = model;
+        channel.modelsConfigured = true; channel.availableModels = {model}; channel.enabledModels = {model};
         if (found == state.routing.channels.end()) {
             if (state.routing.channels.size() >= 64) throw Error("供应商池已满，请移除渠道后重新应用");
             state.routing.channels.push_back(channel);
@@ -971,11 +1001,18 @@ static void applyQwenEndpoint(State& state, const Json& result) {
         state.set(state.get(Model), wide(model));
         state.logLine(L"已应用 Qwen-Image 本地端点；插件停用或程序退出后服务将停止");
     }
+    refreshPoolModels(state);
     saveSettings(state);
 }
 static void configureQwen(State& state) {
     if (state.busy || !state.pluginEnabled("memestudio.qwen-image")) return;
     applyQwenEndpoint(state, state.plugins->command("memestudio.qwen-image", "configure", Json::object(), state.window));
+}
+static void acceptPanelJob(State& state, const Job& job) {
+    auto plugin = job.generate ? "memestudio.prompt-draw" : "memestudio.local-redraw";
+    if (!state.pluginEnabled(plugin)) throw Error("对应插件已停用，请重新加载后操作");
+    if (state.busy) throw Error("主界面有任务正在运行，请完成或取消后再生成");
+    start(state, &job);
 }
 static void updatePluginEntries(State& state) {
     int x = 380;
@@ -1009,6 +1046,13 @@ static Job drawingOptions(State& state) {
     return job;
 }
 static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
+    for (const auto& [id, key] : {std::pair{"memestudio.prompt-draw", "drawing"},
+        {"memestudio.local-redraw", "refine"}, {"memestudio.waifu2x", "upscale"},
+        {"memestudio.api-parameter-test", "probe"}, {"memestudio.api-load-balancing", "routing"}})
+        if (std::find(enabled.begin(), enabled.end(), id) == enabled.end()) {
+            destroyPanel(key);
+            if (std::string(key) == "routing") destroyPanel("comparison");
+        }
     state.plugins.reset();
     state.enabledPlugins.clear();
     updateProviderControls(state);
@@ -1020,7 +1064,11 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
         if (IsWindow(window) && PostMessageW(window, WM_PROGRESS, 0, reinterpret_cast<LPARAM>(event.get())))
             event.release();
     };
-    state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger);
+    auto action = [window = state.window](const std::string& plugin, const Json& result) {
+        auto event = std::make_unique<Json>(Json{{"plugin", plugin}, {"result", result}});
+        if (IsWindow(window) && PostMessageW(window, WM_PLUGIN_ACTION, 0, LPARAM(event.get()))) event.release();
+    };
+    state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger, action);
     state.enabledPlugins = enabled;
     updateProviderControls(state);
     updatePluginEntries(state);
@@ -1028,6 +1076,7 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
         auto current = state.source; loadSource(state, current);
     }
     updateSourceControls(state);
+    refreshPoolModels(state);
 }
 enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, PluginFolder, PluginApply };
 struct PluginDialog {
@@ -1128,10 +1177,10 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             if (reinterpret_cast<NMHDR*>(lparam)->code == LVN_ITEMCHANGED) fillPluginCommands(*dialog);
             return FALSE;
         }
-        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message == WM_CLOSE) { finishPanel(window, IDCANCEL); return TRUE; }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wparam)) {
-        case IDCANCEL: EndDialog(window, IDCANCEL); return TRUE;
+        case IDCANCEL: finishPanel(window, IDCANCEL); return TRUE;
         case PluginFolder: {
             auto directory = pluginDirectory(); fs::create_directories(directory);
             ShellExecuteW(window, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL); return TRUE;
@@ -1142,14 +1191,19 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             fillPluginList(*dialog, enabled); return TRUE;
         }
         case PluginApply:
-            applyPlugins(state, selectedPlugins(*dialog)); saveSettings(state);
+            if (state.busy) throw Error("请等待主界面任务结束后再应用插件设置");
+            if (auto ids = selectedPlugins(*dialog); ids != state.enabledPlugins) applyPlugins(state, ids);
+            saveSettings(state);
             state.logLine(L"插件设置已应用"); return TRUE;
         case PluginRun: {
+            if (state.busy) throw Error("请等待主界面任务结束后再执行插件命令");
             int selected = ListView_GetNextItem(dialog->list, -1, LVNI_SELECTED);
             int commandIndex = int(SendMessageW(dialog->commands, CB_GETCURSEL, 0, 0));
             if (selected < 0 || commandIndex < 0) throw Error("请选择插件和命令");
             auto info = state.availablePlugins[selected];
-            applyPlugins(state, selectedPlugins(*dialog)); saveSettings(state);
+            auto selectedIds = selectedPlugins(*dialog);
+            if (selectedIds != state.enabledPlugins) applyPlugins(state, selectedIds);
+            saveSettings(state);
             Json context{{"source", utf8(state.source.wstring())}, {"character", utf8(state.character.wstring())},
                 {"result", utf8(state.resultPath.wstring())},
                 {"output", utf8(state.text(state.output))}, {"instruction", utf8(state.text(state.instruction))}};
@@ -1158,16 +1212,14 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
                 if (std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.prompt-draw") ==
                     state.enabledPlugins.end()) throw Error("请先启用无图绘制插件");
                 auto job = drawingOptions(state);
-                if (editDrawing(state.instance, window, job)) {
-                    dialog->refinement = std::move(job); EndDialog(window, IDOK);
-                }
+                editDrawing(state.instance, state.window, job, false,
+                    [&state](const Job& value) { acceptPanelJob(state, value); });
                 return TRUE;
             }
             if (result.value("action", "") == "api_parameter_test") {
                 if (info.id != "memestudio.api-parameter-test")
                     throw Error("仅 API 参数支持测试插件可启动该流程");
-                dialog->apiTest = true;
-                EndDialog(window, IDOK);
+                startApiParameterTest(state);
                 return TRUE;
             }
             if (result.value("action", "") == "api_routing") {
@@ -1180,16 +1232,15 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             }
             if (result.value("action", "") == "refine") {
                 Job job; job.source = state.resultPath;
-                if (editRefinement(state.instance, window, job, false)) {
-                    dialog->refinement = std::move(job);
-                    EndDialog(window, IDOK);
-                }
+                editRefinement(state.instance, state.window, job, false,
+                    [&state](const Job& value) { acceptPanelJob(state, value); });
                 return TRUE;
             }
             if (result.value("action", "") == "configure_upscale") {
-                if (editUpscale(state.instance, window, state.upscale)) {
-                    saveSettings(state); state.logLine(L"Waifu2x 输入/输出超分设置已保存");
-                }
+                editUpscale(state.instance, state.window, state.upscale, false, [&state](const UpscaleOptions& value) {
+                    if (!state.pluginEnabled("memestudio.waifu2x")) throw Error("Waifu2x 插件已停用");
+                    state.upscale = value; saveSettings(state); state.logLine(L"Waifu2x 输入/输出超分设置已保存");
+                });
                 return TRUE;
             }
             if (result.value("action", "") == "batch_import" || result.value("action", "") == "batch_folder") {
@@ -1221,12 +1272,19 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
 }
 static void managePlugins(State& state, bool capture = false) {
     if (state.busy) return;
+    if (!capture && activatePanel("plugins")) return;
     state.availablePlugins = discoverPlugins(pluginDirectory());
-    PluginDialog dialog{&state};
+    auto storage = std::make_shared<PluginDialog>(); auto& dialog = *storage;
+    dialog.state = &state;
     dialog.capture = capture;
     struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
     resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
     resource.dialog.cx = 460; resource.dialog.cy = 260;
+    if (!capture) {
+        openPanel("plugins", state.instance, state.window, &resource.dialog, pluginProcedure,
+            reinterpret_cast<LPARAM>(&dialog), storage);
+        return;
+    }
     auto result = DialogBoxIndirectParamW(state.instance, &resource.dialog, state.window, pluginProcedure,
         reinterpret_cast<LPARAM>(&dialog));
     if (result == -1) throw Error("无法打开插件管理窗口");
@@ -1241,7 +1299,12 @@ static void selectResult(State& state, size_t index) {
     state.resultPath = path; state.showingResult = true; state.refreshViews();
 }
 static void fetchModels(State& state) {
-    if (state.busy || state.gatewayEnabled()) return;
+    if (state.busy) return;
+    if (state.gatewayEnabled()) {
+        refreshPoolModels(state);
+        state.logLine(L"已汇总供应商池的启用模型；可在 API 均衡灾备中获取并勾选各 API 模型");
+        return;
+    }
     Provider provider;
     provider.baseUrl = state.text(state.get(BaseUrl));
     provider.key = state.text(state.get(Key));
@@ -1288,7 +1351,7 @@ static void start(State& state, const Job* refinement) {
         job.output = refinement->output; job.stride = 1; job.maxFrames = 0;
     }
     job.provider.baseUrl = state.text(state.get(BaseUrl)); job.provider.key = state.text(state.get(Key));
-    job.provider.model = utf8(state.text(state.get(Model))); job.provider.quality = utf8(state.text(state.get(Quality)));
+    job.provider.model = selectedModel(state); job.provider.quality = utf8(state.text(state.get(Quality)));
     auto modelBegin = job.provider.model.find_first_not_of(" \t\r\n");
     auto modelEnd = job.provider.model.find_last_not_of(" \t\r\n");
     if (modelBegin == std::string::npos) throw Error("请先选择或填写模型名称");
@@ -1383,12 +1446,13 @@ static void start(State& state, const Job* refinement) {
 }
 static void startApiParameterTest(State& state) {
     if (state.busy) return;
+    if (activatePanel("probe")) return;
     if (!state.pluginEnabled("memestudio.api-parameter-test"))
         throw Error("请先加载 API 参数支持测试插件");
     Provider provider;
     provider.baseUrl = state.text(state.get(BaseUrl));
     provider.key = state.text(state.get(Key));
-    provider.model = utf8(state.text(state.get(Model)));
+    provider.model = selectedModel(state);
     provider.quality = utf8(state.text(state.get(Quality)));
     provider.size = utf8(state.text(state.get(Size)));
     provider.imageField = utf8(state.text(state.get(ImageField)));
@@ -1422,6 +1486,7 @@ static void startApiParameterTest(State& state) {
     showParameterProbe(state.instance, state.window, provider, state.source, state.character, state.crop, false, {}, targets);
 }
 static void configureRouting(State& state) {
+    if (activatePanel("routing")) return;
     if (state.busy || !state.pluginEnabled("memestudio.api-load-balancing")) return;
     Job input;
     input.source = state.source; input.character = state.character; input.crop = state.crop;
@@ -1429,7 +1494,7 @@ static void configureRouting(State& state) {
     input.preserveText = state.checked(PreserveText);
     auto& provider = input.provider;
     provider.baseUrl = state.text(state.get(BaseUrl)); provider.key = state.text(state.get(Key));
-    provider.model = utf8(state.text(state.get(Model))); provider.quality = utf8(state.text(state.get(Quality)));
+    provider.model = selectedModel(state); provider.quality = utf8(state.text(state.get(Quality)));
     provider.size = utf8(state.text(state.get(Size))); provider.imageField = utf8(state.text(state.get(ImageField)));
     provider.complexity = utf8(state.text(state.get(Complexity)));
     provider.outputFormat = utf8(state.text(state.get(OutputFormat)));
@@ -1444,10 +1509,13 @@ static void configureRouting(State& state) {
     provider.timeoutSeconds = state.number(Timeout, 5, 3600);
     provider.extra = Json::parse(utf8(state.text(state.get(Extra))));
     provider.router = state.lastRouter;
-    if (editApiRouting(state.instance, state.window, state.routing, input)) {
+    editApiRouting(state.instance, state.window, state.routing, input, false, {}, [&state](const RoutingOptions& value) {
+        if (!state.pluginEnabled("memestudio.api-load-balancing")) throw Error("API 均衡灾备插件已停用");
+        state.routing = value;
         updateProviderControls(state);
+        refreshPoolModels(state);
         saveSettings(state); state.logLine(L"聚合网关及供应商池已保存，下次生成任务生效");
-    }
+    });
 }
 static void layout(State& state) {
     RECT rect; GetClientRect(state.window, &rect);
@@ -1626,7 +1694,8 @@ static void command(State& state, int id, int notification) {
         auto action = state.plugins->command("memestudio.prompt-draw", "draw", Json::object(), state.window);
         if (action.value("action", "") == "prompt_draw") {
             auto job = drawingOptions(state);
-            if (editDrawing(state.instance, state.window, job)) start(state, &job);
+            editDrawing(state.instance, state.window, job, false,
+                [&state](const Job& value) { acceptPanelJob(state, value); });
         }
         return;
     }
@@ -1654,7 +1723,8 @@ static void command(State& state, int id, int notification) {
             {{"result", utf8(state.resultPath.wstring())}}, state.window);
         if (result.value("action", "") == "refine") {
             Job job; job.source = state.resultPath;
-            if (editRefinement(state.instance, state.window, job)) start(state, &job);
+            editRefinement(state.instance, state.window, job, false,
+                [&state](const Job& value) { acceptPanelJob(state, value); });
         }
         return;
     }
@@ -1716,6 +1786,12 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
     if (!state) return DefWindowProcW(window, message, wparam, lparam);
     try {
         switch (message) {
+        case WM_PLUGIN_ACTION: {
+            std::unique_ptr<Json> action(reinterpret_cast<Json*>(lparam));
+            if (!state->closing && state->pluginEnabled("memestudio.qwen-image") &&
+                action->value("plugin", "") == "memestudio.qwen-image") applyQwenEndpoint(*state, action->at("result"));
+            return 0;
+        }
         case WM_CREATE: initialize(*state); return 0;
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
@@ -1769,7 +1845,11 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             if (completion->modelFetch) {
                 state->fetchingModels = false;
                 state->set(state->get(FetchModels), L"获取模型");
-                if (completion->success) {
+                if (state->gatewayEnabled()) {
+                    refreshPoolModels(*state);
+                    state->logLine(L"供应商池配置已更新，模型列表已按当前池重新汇总");
+                } else if (completion->success) {
+                    state->modelChoices.clear();
                     auto selection = state->text(state->get(Model));
                     std::stable_sort(completion->models.begin(), completion->models.end(),
                         [](const auto& a, const auto& b) {
@@ -1828,7 +1908,15 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             try { saveSettings(*state); } catch (const std::exception& error) { state->logLine(wide(error.what())); }
             if (state->busy) { state->closing = true; state->cancel.stop(); return 0; }
             DestroyWindow(window); return 0;
-        case WM_DESTROY: KillTimer(window, 1); PostQuitMessage(0); return 0;
+        case WM_DESTROY:
+            destroyPanels();
+            state->plugins.reset();
+            {
+                MSG pending{};
+                while (PeekMessageW(&pending, window, WM_PLUGIN_ACTION, WM_PLUGIN_ACTION, PM_REMOVE))
+                    delete reinterpret_cast<Json*>(pending.lParam);
+            }
+            KillTimer(window, 1); PostQuitMessage(0); return 0;
         }
     } catch (const std::exception& error) {
         MessageBoxW(window, wide(error.what()).c_str(), L"表情重绘", MB_OK | MB_ICONERROR);
@@ -2244,6 +2332,69 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         if (!state.previewImage || state.text(state.frameInfo) != L"局部 1")
             throw Error("Partial image preview dispatch failed");
         report["partial_preview_dispatch"] = "passed";
+        {
+            auto routing = state.routing;
+            auto modelText = state.text(state.get(Model));
+            state.routing = routeOptions;
+            state.routing.channels[0].baseUrl = L"https://supplier-a.invalid/v1";
+            state.routing.channels[1].baseUrl = L"https://supplier-b.invalid/v1";
+            state.routing.channels[0].modelsConfigured = state.routing.channels[1].modelsConfigured = true;
+            state.routing.channels[0].availableModels = state.routing.channels[0].enabledModels = {"shared", "only-a"};
+            state.routing.channels[1].availableModels = state.routing.channels[1].enabledModels = {"shared", "only-b"};
+            applyPlugins(state, {"memestudio.api-load-balancing", "memestudio.qwen-image"});
+            auto only = std::find_if(state.modelChoices.begin(), state.modelChoices.end(),
+                [](const auto& item) { return item.id == "only-b"; });
+            if (only == state.modelChoices.end() || only->label != L"only-b (API-1 / Key-2)") throw Error("Supplier label missing");
+            state.set(state.get(Model), only->label);
+            if (selectedModel(state) != "only-b") throw Error("Supplier label entered request model ID");
+            auto job = drawingOptions(state);
+            bool accepted = false;
+            editDrawing(instance, window, job, false, [&](const Job&) { accepted = true; });
+            auto drawingWindow = findPanel("drawing");
+            editDrawing(instance, window, job);
+            if (findPanel("drawing") != drawingWindow) throw Error("Duplicate panel opened");
+            showParameterProbe(instance, window, probeProvider, {}, {}, {});
+            editApiRouting(instance, window, state.routing, compareInput);
+            auto upscaleValue = state.upscale; editUpscale(instance, window, upscaleValue);
+            auto refined = job; refined.source = demo / L"source.png"; editRefinement(instance, window, refined);
+            managePlugins(state);
+            configureQwen(state);
+            bool qwenVisible = false;
+            EnumThreadWindows(GetCurrentThreadId(), [](HWND item, LPARAM data) -> BOOL {
+                wchar_t title[128]{}; GetWindowTextW(item, title, 128);
+                if (wcscmp(title, L"本地模型支持 - Qwen-Image") == 0 && IsWindowVisible(item))
+                    *reinterpret_cast<bool*>(data) = true;
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&qwenVisible));
+            if (!IsWindowEnabled(window) || panels::opened.size() != 6 ||
+                !qwenVisible || !IsWindowEnabled(findPanel("probe")) || !IsWindowEnabled(findPanel("routing")))
+                throw Error("Concurrent plugin panels disabled main window or each other");
+            snapshot(960, 760, L"ui-routing-models.png", findPanel("routing"));
+            SendMessageW(drawingWindow, WM_COMMAND, IDCANCEL, 0);
+            MSG pending{};
+            while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
+                if (pending.message == WM_QUIT) continue;
+                if (!panelMessage(pending)) { TranslateMessage(&pending); DispatchMessageW(&pending); }
+            }
+            if (accepted || findPanel("drawing") || !findPanel("probe") || !IsWindowEnabled(window))
+                throw Error("Closing one panel affected another");
+            job.instruction = L"Local panel validation"; job.output = demo / L"panel-output.png";
+            editDrawing(instance, window, job, false, [&](const Job& value) {
+                accepted = value.instruction == job.instruction && value.generate;
+            });
+            SendMessageW(findPanel("drawing"), WM_COMMAND, IDOK, 0);
+            while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
+                if (pending.message == WM_QUIT) continue;
+                if (!panelMessage(pending)) { TranslateMessage(&pending); DispatchMessageW(&pending); }
+            }
+            if (!accepted) throw Error("Modeless panel completion callback failed");
+            destroyPanels();
+            if (!panels::opened.empty()) throw Error("Panel lifetime leaked");
+            applyPlugins(state, {});
+            state.routing = routing; state.set(state.get(Model), modelText); refreshPoolModels(state);
+            report["concurrent_panels"] = "passed (six panels plus native Qwen; duplicate activation and independent close)";
+            report["pool_model_selector"] = "passed (supplier labels resolve to exact model IDs)";
+        }
         SendMessageW(state.settings, WM_VSCROLL, SB_BOTTOM, 0);
         snapshot(1280, 900, L"ui-settings.png");
         writeJson(demo / L"ui-results.json", report);
@@ -2253,7 +2404,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
     ShowWindow(window, SW_SHOWNORMAL); UpdateWindow(window);
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        if (!panelMessage(message) && !IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
     return static_cast<int>(message.wParam);
 }

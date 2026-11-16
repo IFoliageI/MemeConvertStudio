@@ -32,7 +32,7 @@ const server = http.createServer(async (request, response) => {
       }).formData());
     observed.push({ url: request.url, key: request.headers.authorization, model: parameters.model,
       prompt: parameters.prompt });
-    assert.equal(parameters.model, request.url.startsWith("/b/") ? "model-b" : "model-a");
+    assert.equal(parameters.model, "shared-image");
     if (request.url.includes("/images/edits")) assert(parameters["image[]"]);
     if (failure === "all" || (failure && request.url.startsWith("/a/"))) {
       if (failure === "drop") { request.socket.destroy(); return; }
@@ -74,12 +74,14 @@ function run(args) {
   });
 }
 const channels = [
-  { name: "A", base_url: `${base}/a`, api_key_env: "ROUTE_A", weight: 3, model: "model-a" },
-  { name: "B", base_url: `${base}/b`, api_key_env: "ROUTE_B", weight: 1, model: "model-b" },
+  { name: "A", base_url: `${base}/a`, api_key_env: "ROUTE_A", weight: 3,
+    models_configured: true, available_models: ["shared-image", "a-only"], enabled_models: ["shared-image", "a-only"] },
+  { name: "B", base_url: `${base}/b`, api_key_env: "ROUTE_B", weight: 1,
+    models_configured: true, available_models: ["shared-image", "b-only"], enabled_models: ["shared-image", "b-only"] },
 ];
 async function job(name, routing = {}, extra = {}) {
   observed = [];
-  const config = { mode: "generate", model: "fallback", instruction: "Draw a waving character",
+  const config = { mode: "generate", model: "shared-image", instruction: "Draw a waving character",
     output: path.join(directory, `${name}.png`), resume: false,
     plugins: ["memestudio.prompt-draw", "memestudio.api-load-balancing"],
     api_routing: { enabled: true, channels, ...routing },

@@ -7,6 +7,7 @@
 在设置底部打开“插件管理”，可启停插件、重新扫描、打开目录和执行插件命令。
 关闭窗口会放弃尚未应用的勾选；“执行命令”会先应用当前勾选。
 生成或获取模型期间不能修改插件或执行命令。
+各功能面板为非模态窗口，可并行打开；重复打开激活已有窗口。停用插件时关闭对应面板。
 主界面的插件专属入口仅在对应 DLL 成功加载后显示。停用或应用失败会隐藏入口；
 批量转换的目录与素材翻页控件同样按加载状态显示。任务期间入口保持显示但不可操作。
 
@@ -38,6 +39,9 @@ __cdecl MemeStudioGetPluginV1(void)`。返回静态存储的结构，设置 `str
 和 `abi_version`，不需要的回调可设为空。
 
 - `initialize`：接收宿主日志回调，返回 0 成功；非零导致启用失败。
+  `MemeStudioHostV1` 尾部可选的 `post_action` 支持非模态面板异步提交 JSON 动作。
+  调用前必须根据 `struct_size` 检查字段是否存在且非空；旧宿主不提供该字段。
+  参数在回调返回前同步复制，宿主在界面线程处理。现仅接受 Qwen 插件的 `qwen_endpoint`。
 - `transform_prompt`：每个未缓存帧请求前修改完整提示词；返回空指针表示不修改。
 - `process_frame`：供应商最终图像恢复为源尺寸后、写缓存前处理 BGRA8 像素；
   返回 0 成功。不能改变宽高、步长、像素指针或释放宿主存储。
@@ -146,7 +150,7 @@ CLI 在原有任务配置增加以下字段；不在 JSON 中填写明文 Key，
         "name": "API-B / backup",
         "base_url": "https://api-b.example/v1",
         "api_key_env": "API_B_KEY",
-        "model": "provider-image-model",
+        "model": "gpt-image-1",
         "weight": 1,
         "priority": 1,
         "unit_cost": 2
@@ -157,7 +161,21 @@ CLI 在原有任务配置增加以下字段；不在 JSON 中填写明文 Key，
 }
 ```
 
-`model` 留空时继承任务模型，图像参数始终继承主任务。无图绘制时还需启用
+未配置模型列表时，`model` 留空继承任务模型；非空只接受同名模型任务。
+设置 `models_configured: true` 后，`available_models` 为该 Key 获取的模型 ID 数组，
+`enabled_models` 为其中允许显示和路由的子集，可为空。此时忽略旧 `model` 覆盖，
+请求使用主界面所选的真实模型 ID。示例：
+
+```json
+{
+  "models_configured": true,
+  "available_models": ["gpt-image-1", "supplier-image"],
+  "enabled_models": ["supplier-image"]
+}
+```
+
+模型列表随渠道保存，不含 Key；同名模型跨 API 合并，独家模型显示供应商别名。
+均衡和灾备均限制在支持所选模型的启用渠道。图像参数始终继承主任务。无图绘制时还需启用
 `memestudio.prompt-draw`，多源队列还需启用 `memestudio.batch-convert`。
 最多 64 个渠道；权重 1–10000、优先级 0–99、单价 0.000001–1000000，
 冷却 1–3600 秒。同接口和 Key 的重复项被拒绝。URL 不允许查询参数或内嵌凭据；

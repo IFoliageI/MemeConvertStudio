@@ -21,6 +21,8 @@ typedef struct MemeStudioHostV1 {
     uint32_t abi_version;
     void* context;
     void (MEMESTUDIO_CALL *log)(void* context, const char* message_utf8);
+    /* Optional tail field. Check struct_size before use; payload is copied synchronously. */
+    void (MEMESTUDIO_CALL *post_action)(void* context, const char* plugin_id, const char* action_json);
 } MemeStudioHostV1;
 
 /* BGRA8, writable only during process_frame. Dimensions and storage are host-owned. */

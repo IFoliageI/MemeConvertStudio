@@ -152,12 +152,15 @@ std::string prompt(const Job& job, int index, int total, size_t styleCount, bool
 void runJob(const Job& job, Cancel& cancel, const Reporter& report);
 std::vector<fs::path> outputPaths(const Job& job);
 Image preserveOutside(const Image& original, const Image& edited, const Crop& region);
-bool editRefinement(HINSTANCE instance, HWND owner, Job& job, bool capture = false);
-bool editDrawing(HINSTANCE instance, HWND owner, Job& job, bool capture = false);
+bool editRefinement(HINSTANCE instance, HWND owner, Job& job, bool capture = false,
+    const std::function<void(const Job&)>& completed = {});
+bool editDrawing(HINSTANCE instance, HWND owner, Job& job, bool capture = false,
+    const std::function<void(const Job&)>& completed = {});
 void runDrawing(const Job& job, Cancel& cancel, const Reporter& report);
 Json upscaleJson(const UpscaleOptions& options);
 UpscaleOptions upscaleOptions(const Json& value);
-bool editUpscale(HINSTANCE instance, HWND owner, UpscaleOptions& options, bool capture = false);
+bool editUpscale(HINSTANCE instance, HWND owner, UpscaleOptions& options, bool capture = false,
+    const std::function<void(const UpscaleOptions&)>& completed = {});
 int runGui(HINSTANCE instance, const fs::path& demo = {}, bool capture = false);
 int selfTest(const fs::path& directory);
 int networkTest(const fs::path& directory, const std::wstring& base);

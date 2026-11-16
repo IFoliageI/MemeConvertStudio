@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "panels.hpp"
 #include <commctrl.h>
 #include <shobjidl.h>
 #include <shellapi.h>
@@ -151,10 +152,10 @@ static INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             addStyles(*dialog, {dialog->value.output.parent_path() / L"style.png"});
             capture(*dialog); SendMessageW(window, WM_COMMAND, IDOK, 0); return TRUE;
         }
-        if (message == WM_CLOSE) { EndDialog(window, IDCANCEL); return TRUE; }
+        if (message == WM_CLOSE) { finishPanel(window, IDCANCEL); return TRUE; }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wparam)) {
-        case IDCANCEL: EndDialog(window, IDCANCEL); return TRUE;
+        case IDCANCEL: finishPanel(window, IDCANCEL); return TRUE;
         case Styles:
             if (HIWORD(wparam) == LBN_SELCHANGE) showStyle(*dialog);
             return TRUE;
@@ -206,22 +207,32 @@ static INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             dialog->value.output = text(window, Output);
             if (dialog->value.output.empty() || _wcsicmp(dialog->value.output.extension().c_str(), L".png") != 0)
                 throw Error("请选择 .png 保存路径");
-            dialog->accepted = true; EndDialog(window, IDOK); return TRUE;
+            dialog->accepted = true; finishPanel(window, IDOK); return TRUE;
         }
     } catch (const std::exception& error) {
-        if (dialog && dialog->capture) { dialog->failure = error.what(); EndDialog(window, IDABORT); return TRUE; }
+        if (dialog && dialog->capture) { dialog->failure = error.what(); finishPanel(window, IDABORT); return TRUE; }
         MessageBoxW(window, wide(error.what()).c_str(), L"无图绘制", MB_OK | MB_ICONERROR);
     }
     return FALSE;
 }
 }
-bool editDrawing(HINSTANCE instance, HWND owner, Job& job, bool capture) {
-    DrawingDialog dialog; dialog.instance = instance; dialog.value = job; dialog.capture = capture;
+bool editDrawing(HINSTANCE instance, HWND owner, Job& job, bool capture,
+    const std::function<void(const Job&)>& completed) {
+    if (!capture && activatePanel("drawing")) return false;
+    auto storage = std::make_shared<DrawingDialog>(); auto& dialog = *storage;
+    dialog.instance = instance; dialog.value = job; dialog.capture = capture;
     dialog.value.generate = true; dialog.value.refine = false;
     dialog.value.source.clear(); dialog.value.character.clear();
     struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
     resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
     resource.dialog.cx = 480; resource.dialog.cy = 380;
+    if (!capture) {
+        openPanel("drawing", instance, owner, &resource.dialog, procedure,
+            reinterpret_cast<LPARAM>(&dialog), storage, [storage, completed](INT_PTR result) {
+                if (result == IDOK && completed) completed(storage->value);
+            });
+        return false;
+    }
     auto result = DialogBoxIndirectParamW(instance, &resource.dialog, owner, procedure, reinterpret_cast<LPARAM>(&dialog));
     if (result == -1) throw Error("无法打开无图绘制窗口");
     if (!dialog.failure.empty()) throw Error(dialog.failure);

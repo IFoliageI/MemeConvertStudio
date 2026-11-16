@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <map>
 
 namespace studio {
 Provider channelProvider(const Provider& base, const ApiChannel& channel) {
@@ -10,7 +11,29 @@ Provider channelProvider(const Provider& base, const ApiChannel& channel) {
     result.router.reset();
     result.gateway.reset();
     result.baseUrl = channel.baseUrl; result.key = channel.key;
-    if (!channel.model.empty()) result.model = channel.model;
+    if (!channel.modelsConfigured && !channel.model.empty()) result.model = channel.model;
+    return result;
+}
+bool channelSupports(const ApiChannel& channel, const std::string& model) {
+    if (channel.modelsConfigured)
+        return std::find(channel.enabledModels.begin(), channel.enabledModels.end(), model) != channel.enabledModels.end();
+    return channel.model.empty() || channel.model == model;
+}
+std::vector<PoolModel> poolModels(const RoutingOptions& options, const std::string& inherited) {
+    std::map<std::string, std::map<std::wstring, std::string>> models;
+    for (const auto& channel : options.channels) {
+        if (!channel.enabled) continue;
+        auto ids = channel.modelsConfigured ? channel.enabledModels :
+            std::vector<std::string>{channel.model.empty() ? inherited : channel.model};
+        for (const auto& id : ids) if (!id.empty())
+            models[id].try_emplace(modelsUrl(channel.baseUrl), channel.name);
+    }
+    std::vector<PoolModel> result;
+    for (const auto& [id, suppliers] : models) {
+        auto label = wide(id);
+        if (suppliers.size() == 1) label += L" (" + wide(suppliers.begin()->second) + L")";
+        result.push_back({id, label});
+    }
     return result;
 }
 Json routingJson(const RoutingOptions& options, bool encrypted) {
@@ -20,7 +43,9 @@ Json routingJson(const RoutingOptions& options, bool encrypted) {
     for (const auto& channel : options.channels) {
         Json item{{"name", channel.name}, {"base_url", utf8(channel.baseUrl)}, {"model", channel.model},
             {"weight", channel.weight}, {"priority", channel.priority}, {"unit_cost", channel.unitCost},
-            {"enabled", channel.enabled}, {"compare", channel.compare}};
+            {"enabled", channel.enabled}, {"compare", channel.compare},
+            {"models_configured", channel.modelsConfigured}, {"available_models", channel.availableModels},
+            {"enabled_models", channel.enabledModels}};
         if (encrypted && options.remember && !channel.key.empty()) item["encrypted_key"] = protect(channel.key);
         result["channels"].push_back(std::move(item));
     }
@@ -40,6 +65,14 @@ RoutingOptions routingOptions(const Json& json, bool encrypted) {
         channel.model = item.value("model", ""); channel.weight = item.value("weight", 1);
         channel.priority = item.value("priority", 0); channel.unitCost = item.value("unit_cost", 1.0);
         channel.enabled = item.value("enabled", true); channel.compare = item.value("compare", true);
+        channel.modelsConfigured = item.value("models_configured", false);
+        channel.availableModels = item.value("available_models", std::vector<std::string>{});
+        channel.enabledModels = item.value("enabled_models", std::vector<std::string>{});
+        if (channel.availableModels.size() > 10000 || channel.enabledModels.size() > 10000)
+            throw Error("单渠道模型列表最多 10000 项");
+        for (const auto& model : channel.enabledModels)
+            if (std::find(channel.availableModels.begin(), channel.availableModels.end(), model) == channel.availableModels.end())
+                throw Error("启用的模型必须属于该渠道模型列表");
         if (encrypted && item.contains("encrypted_key")) channel.key = unprotect(item["encrypted_key"].get<std::string>());
         else if (!encrypted) {
             auto name = wide(item.value("api_key_env", ""));
@@ -81,6 +114,7 @@ void validateRouting(const RoutingOptions& options, const Provider& base) {
             (host == L"localhost" || host == L"127.0.0.1" || host == L"[::1]" || host == L"::1")))
             throw Error("渠道须使用 HTTPS（本机模拟服务除外）");
         if (!seen.emplace(url, channel.key).second) throw Error("同一接口和 Key 请只配置一次");
+        if (channel.modelsConfigured && !channel.enabledModels.empty()) provider.model = channel.enabledModels.front();
         generationBody(provider, "validate");
         multipart(provider, "validate", {{"validate", Bytes{1}}});
     }
@@ -98,6 +132,9 @@ std::string routingRedact(std::string value, const RoutingOptions& options) {
 ApiRouter::ApiRouter(RoutingOptions value, const Provider& base,
     std::function<void(const std::wstring&)> log) : options(std::move(value)), logger(std::move(log)) {
     validateRouting(options, base);
+    if (std::none_of(options.channels.begin(), options.channels.end(),
+        [&](const auto& channel) { return channel.enabled && channelSupports(channel, base.model); }))
+        throw Error("所选模型未在任何启用渠道中开放，请在供应商池勾选该模型");
     states.resize(options.channels.size());
 }
 Image ApiRouter::invoke(const Provider& base, Cancel& cancel,
@@ -113,12 +150,14 @@ Image ApiRouter::invoke(const Provider& base, Cancel& cancel,
             int tier = 100;
             auto now = std::chrono::steady_clock::now();
             for (size_t i = 0; i < states.size(); ++i)
-                if (options.channels[i].enabled && !tried[i] && !states[i].disabled && states[i].cooldown <= now)
+                if (options.channels[i].enabled && channelSupports(options.channels[i], base.model) &&
+                    !tried[i] && !states[i].disabled && states[i].cooldown <= now)
                     tier = std::min(tier, options.channels[i].priority);
             double sum = 0;
             for (size_t i = 0; i < states.size(); ++i) {
                 auto& state = states[i]; const auto& channel = options.channels[i];
-                if (!channel.enabled || tried[i] || state.disabled || state.cooldown > now || channel.priority != tier) continue;
+                if (!channel.enabled || !channelSupports(channel, base.model) ||
+                    tried[i] || state.disabled || state.cooldown > now || channel.priority != tier) continue;
                 double weight = channel.weight / (options.spending ? channel.unitCost : 1.0);
                 sum += weight; state.current += weight;
                 if (selected == states.size() || state.current > states[selected].current) selected = i;
@@ -128,12 +167,12 @@ Image ApiRouter::invoke(const Provider& base, Cancel& cancel,
             }
         }
         if (selected == states.size())
-            throw Error(last.empty() ? "无可用渠道：鉴权失败的渠道已停用，限流渠道冷却中；请检查配置后重新开始" :
+            throw Error(last.empty() ? "所选模型无可用渠道：请检查供应商启用模型、鉴权状态和限流冷却" :
                 "灾备渠道已耗尽：" + last);
         tried[selected] = true;
         const auto& channel = options.channels[selected];
         auto label = wide(routingRedact(channel.name, options));
-        if (logger) logger(L"聚合网关 → 供应商池：" + label + L" · 模型 " + wide(channel.model.empty() ? base.model : channel.model));
+        if (logger) logger(L"聚合网关 → 供应商池：" + label + L" · 模型 " + wide(base.model));
         auto start = std::chrono::steady_clock::now();
         try {
             auto image = request(channelProvider(base, channel));
@@ -199,6 +238,7 @@ std::vector<size_t> comparisonChannels(const RoutingOptions& options, const Prov
     for (size_t i = 0; i < options.channels.size(); ++i) {
         const auto& channel = options.channels[i];
         if (!channel.enabled || !channel.compare) continue;
+        if (channel.modelsConfigured && !channelSupports(channel, base.model)) continue;
         auto model = generationBody(channelProvider(base, channel), "compare").at("model").get<std::string>();
         if (seen.emplace(editUrl(channel.baseUrl), model).second) result.push_back(i);
     }

@@ -93,6 +93,47 @@ int routingTest(const fs::path& directory, const std::wstring& base) {
     require(saved.dump().find("route-secret") == std::string::npos, "Plaintext key persisted");
     require(routingOptions(saved, true).channels[1].key == b.key, "DPAPI key roundtrip failed");
     require(weighted.fingerprint().dump().find("route-secret") == std::string::npos, "Key in cache manifest");
+    {
+        auto catalog = options;
+        catalog.channels[0].modelsConfigured = catalog.channels[1].modelsConfigured = true;
+        catalog.channels[0].availableModels = {"shared", "a-only", "hidden"};
+        catalog.channels[0].enabledModels = {"shared", "a-only"};
+        catalog.channels[1].baseUrl = base + L"/second";
+        catalog.channels[1].availableModels = {"shared", "b-only"};
+        catalog.channels[1].enabledModels = {"shared", "b-only"};
+        auto choices = poolModels(catalog, provider.model);
+        require(choices.size() == 3 && choices[0].label == L"a-only (A)" &&
+            choices[1].label == L"b-only (B)" && choices[2].label == L"shared",
+            "Model catalogue union, visibility or supplier labels failed");
+        auto sameApi = catalog;
+        sameApi.channels[1].baseUrl = base;
+        require(poolModels(sameApi, provider.model).back().label == L"shared (A)",
+            "Multiple keys counted as multiple suppliers");
+        auto roundtrip = routingOptions(routingJson(catalog, true), true);
+        require(roundtrip.channels[0].enabledModels == catalog.channels[0].enabledModels &&
+            roundtrip.channels[0].modelsConfigured, "Model selection persistence failed");
+        auto target = provider; target.model = "b-only";
+        ApiRouter isolated(catalog, target);
+        int calls = 0;
+        isolated.invoke(target, cancel, [&](const Provider& value) {
+            ++calls; require(value.key == b.key && value.model == "b-only", "Unsupported model was routed");
+            return image();
+        });
+        require(calls == 1, "Exclusive model requested more than once");
+        target.model = "hidden";
+        bool rejected = false;
+        try { ApiRouter hidden(catalog, target); } catch (const Error&) { rejected = true; }
+        require(rejected, "Hidden model reached an API");
+        target.model = "shared";
+        catalog.channels[1].priority = 0;
+        ApiRouter common(catalog, target); calls = 0;
+        common.invoke(target, cancel, [&](const Provider& value) {
+            ++calls; require(value.model == "shared", "Actual model ID was overwritten");
+            if (value.key == a.key) throw ApiHttpError(429, "limited");
+            return image();
+        });
+        require(calls == 2, "Shared-model failover failed");
+    }
     require(comparisonChannels(options).size() == 1, "Same provider/model was compared twice");
     options.channels[0].model = provider.model;
     require(comparisonChannels(options, provider).size() == 1, "Inherited model was not deduplicated");
@@ -104,7 +145,8 @@ int routingTest(const fs::path& directory, const std::wstring& base) {
     require(duplicate, "Duplicate API/key accepted");
     writeJson(directory / L"routing-unit.json", {{"weighted_requests", "30:10"}, {"estimated_spending", "30:30"},
         {"failover", "passed"}, {"ambiguous_outcome_stop", "passed"}, {"bounded_attempts", "passed"},
-        {"cancellation", "passed"}, {"credential_protection", "passed"}, {"comparison_deduplication", "passed"}});
+        {"cancellation", "passed"}, {"credential_protection", "passed"}, {"comparison_deduplication", "passed"},
+        {"pool_models", "passed"}, {"model_eligibility", "passed"}});
     return 0;
 }
 }

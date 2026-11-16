@@ -1,4 +1,5 @@
 #include "api_routing.hpp"
+#include "panels.hpp"
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -197,6 +198,15 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             return TRUE;
         }
         if (!dialog) return FALSE;
+        if (message == WM_DESTROY) {
+            dialog->cancel.stop();
+            if (dialog->worker.joinable()) dialog->worker.join();
+            MSG pending{};
+            while (PeekMessageW(&pending, window, ResultMessage, FinishMessage, PM_REMOVE)) {
+                if (pending.message == ResultMessage) delete reinterpret_cast<Result*>(pending.lParam);
+                else delete reinterpret_cast<std::string*>(pending.lParam);
+            }
+        }
         if (message == WM_APP + 53 && dialog->capture) {
             if (SendDlgItemMessageW(window, Mode, CB_GETCURSEL, 0, 0) == CB_ERR ||
                 SendDlgItemMessageW(window, Left, CB_GETCURSEL, 0, 0) != 0 ||
@@ -207,7 +217,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             if (dialog->images.size() > 1)
                 dialog->images[1] = limited(decode(dialog->input.character).frames.front().image);
             if (dialog->snapshot) dialog->snapshot(window);
-            EndDialog(window, IDOK); return TRUE;
+            finishPanel(window, IDOK); return TRUE;
         }
         if (message == WM_DRAWITEM && (wparam == ViewLeft || wparam == ViewRight)) {
             auto index = SendDlgItemMessageW(window, wparam == ViewLeft ? Left : Right, CB_GETCURSEL, 0, 0);
@@ -236,12 +246,12 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             SetDlgItemTextW(window, Summary, failure->empty() ?
                 L"对比结束。图像与 report.json 已保存在结果目录；各结果来自独立生成，随机性可能影响比较。" :
                 wide(*failure).c_str());
-            if (dialog->closing) EndDialog(window, IDCANCEL);
+            if (dialog->closing) finishPanel(window, IDCANCEL);
             return TRUE;
         }
         if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wparam) == IDCANCEL)) {
             if (dialog->busy) { dialog->closing = true; dialog->cancel.stop(); }
-            else EndDialog(window, IDCANCEL);
+            else finishPanel(window, IDCANCEL);
             return TRUE;
         }
         if (message != WM_COMMAND) return FALSE;
@@ -254,7 +264,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         }
     } catch (const std::exception& error) {
         if (dialog && dialog->capture) {
-            dialog->failure = error.what(); EndDialog(window, IDABORT); return TRUE;
+            dialog->failure = error.what(); finishPanel(window, IDABORT); return TRUE;
         }
         MessageBoxW(window, wide(dialog ? routingRedact(error.what(), dialog->options) : error.what()).c_str(),
             L"API 效果对比", MB_OK | MB_ICONERROR);
@@ -265,7 +275,9 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
 void showApiComparison(HINSTANCE instance, HWND owner, const RoutingOptions& options, const Job& input,
     bool capture, const std::function<void(HWND)>& snapshot) {
     validateRouting(options, input.provider);
-    Dialog dialog; dialog.instance = instance; dialog.options = options; dialog.input = input;
+    if (!capture && activatePanel("comparison")) return;
+    auto storage = std::make_shared<Dialog>(); auto& dialog = *storage;
+    dialog.instance = instance; dialog.options = options; dialog.input = input;
     dialog.capture = capture; dialog.snapshot = snapshot;
     dialog.channels = comparisonChannels(options, input.provider);
     if (dialog.channels.empty()) throw Error("请至少将一个启用渠道加入效果对比");
@@ -273,6 +285,10 @@ void showApiComparison(HINSTANCE instance, HWND owner, const RoutingOptions& opt
     struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
     resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
     resource.dialog.cx = 600; resource.dialog.cy = 450;
+    if (!capture) {
+        openPanel("comparison", instance, owner, &resource.dialog, procedure, reinterpret_cast<LPARAM>(&dialog), storage);
+        return;
+    }
     if (DialogBoxIndirectParamW(instance, &resource.dialog, owner, procedure, reinterpret_cast<LPARAM>(&dialog)) == -1)
         throw Error("无法打开 API 效果对比");
     if (!dialog.failure.empty()) throw Error(dialog.failure);

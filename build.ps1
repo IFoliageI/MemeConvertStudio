@@ -2,12 +2,14 @@ param(
     [switch]$Test,
     [ValidateSet("x64", "arm64")][string]$Architecture = "x64",
     [ValidateSet("x64", "arm64")][string]$HostArchitecture = "x64",
-    [string]$ExecutableName = ""
+    [string]$ExecutableName = "",
+    [string]$OutputDirectory = ""
 )
 $ErrorActionPreference = "Stop"
 if (!$ExecutableName) { $ExecutableName = if ($Architecture -eq "x64") { "MemeStudio.exe" } else { "MemeStudio-arm64.exe" } }
 if ($ExecutableName -notmatch '^[A-Za-z0-9_-]+\.exe$') { throw "ExecutableName must be a simple .exe filename." }
 $project = $PSScriptRoot
+$requestedOutput = $OutputDirectory
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (!(Test-Path -LiteralPath $vswhere)) { $vswhere = Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\Installer\vswhere.exe" }
 if (!(Test-Path -LiteralPath $vswhere)) { throw "Install Visual Studio 2022 or newer with Desktop development with C++." }
@@ -17,6 +19,9 @@ $developerCommand = Join-Path $installation "Common7\Tools\VsDevCmd.bat"
 $buildDirectory = Join-Path $project "build\$Architecture"
 if ($Architecture -eq "x64") { $outputDirectory = Join-Path $project "bin" }
 else { $outputDirectory = Join-Path $project "bin\arm64" }
+if ($requestedOutput) {
+    $outputDirectory = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($requestedOutput)) { $requestedOutput } else { Join-Path $project $requestedOutput }))
+}
 New-Item -ItemType Directory -Force -Path $outputDirectory,$buildDirectory | Out-Null
 Push-Location $buildDirectory
 try {

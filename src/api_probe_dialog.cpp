@@ -1,4 +1,5 @@
 #include "api_probe.hpp"
+#include "panels.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -216,6 +217,13 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             return TRUE;
         }
         if (!dialog) return FALSE;
+        if (message == WM_DESTROY) {
+            dialog->cancel.stop();
+            if (dialog->worker.joinable()) dialog->worker.join();
+            MSG pending{};
+            while (PeekMessageW(&pending, window, RowMessage, DoneMessage, PM_REMOVE))
+                delete reinterpret_cast<Json*>(pending.lParam);
+        }
         if (message == WM_APP + 33 && dialog->capture) {
             if (dialog->cases.size() < 20 || !ListView_GetCheckState(dialog->list, 0)) throw Error("Probe plan missing candidates");
             if (text(window, Summary).find(L"tokens/次") == std::wstring::npos ||
@@ -235,7 +243,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
                     !estimateProbeUsage(dialog->provider)["output_min"].is_null())
                     throw Error("Fixed supplier target selection failed");
             }
-            EndDialog(window, IDOK); return TRUE;
+            finishPanel(window, IDOK); return TRUE;
         }
         if (message == RowMessage) {
             std::unique_ptr<Json> row(reinterpret_cast<Json*>(lparam));
@@ -255,7 +263,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
             dialog->busy = false; dialog->report = std::move(*report); enabled(*dialog, true);
             SetDlgItemTextW(window, Summary, dialog->cancel.stopped ? L"已取消；已发送请求可能仍被计费。" : L"测试结束；结果可选择查看并导出。");
             if (dialog->report.contains("error")) SetDlgItemTextW(window, Detail, wide(dialog->report["error"].get<std::string>()).c_str());
-            if (dialog->closing) EndDialog(window, IDCANCEL);
+            if (dialog->closing) finishPanel(window, IDCANCEL);
             return TRUE;
         }
         if (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lparam)->idFrom == Cases && !dialog->filling) {
@@ -277,7 +285,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         }
         if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wparam) == IDCANCEL)) {
             if (dialog->busy) { dialog->closing = true; dialog->cancel.stop(); }
-            else EndDialog(window, IDCANCEL);
+            else finishPanel(window, IDCANCEL);
             return TRUE;
         }
         if (message != WM_COMMAND) return FALSE;
@@ -318,7 +326,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
         case Export: exportReport(*dialog); return TRUE;
         }
     } catch (const std::exception& error) {
-        if (dialog && dialog->capture) { dialog->failure = error.what(); EndDialog(window, IDABORT); }
+        if (dialog && dialog->capture) { dialog->failure = error.what(); finishPanel(window, IDABORT); }
         else MessageBoxW(window, wide(error.what()).c_str(), L"API 参数测试", MB_OK | MB_ICONERROR);
     }
     return FALSE;
@@ -327,7 +335,9 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPARAM lpar
 void showParameterProbe(HINSTANCE instance, HWND owner, const Provider& provider,
     const fs::path& source, const fs::path& character, const Crop& crop, bool capture,
     const std::function<void(HWND)>& snapshot, const std::vector<ProbeTarget>& targets) {
-    Dialog dialog; dialog.instance = instance; dialog.provider = provider;
+    if (!capture && activatePanel("probe")) return;
+    auto storage = std::make_shared<Dialog>(); auto& dialog = *storage;
+    dialog.instance = instance; dialog.provider = provider;
     dialog.targets = targets;
     if (!targets.empty()) dialog.provider = targets.front().provider;
     dialog.source = source; dialog.character = character; dialog.crop = crop;
@@ -335,6 +345,10 @@ void showParameterProbe(HINSTANCE instance, HWND owner, const Provider& provider
     struct Template { DLGTEMPLATE dialog; WORD menu = 0, type = 0, title = 0; } resource{};
     resource.dialog.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
     resource.dialog.cx = 600; resource.dialog.cy = 440;
+    if (!capture) {
+        openPanel("probe", instance, owner, &resource.dialog, procedure, reinterpret_cast<LPARAM>(&dialog), storage);
+        return;
+    }
     if (DialogBoxIndirectParamW(instance, &resource.dialog, owner, procedure, reinterpret_cast<LPARAM>(&dialog)) == -1)
         throw Error("无法打开 API 参数测试窗口");
     if (!dialog.failure.empty()) throw Error(dialog.failure);

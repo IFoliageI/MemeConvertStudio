@@ -59,12 +59,23 @@ struct Plugins::Module {
     }
 };
 Plugins::Plugins(const std::vector<PluginInfo>& available, const std::vector<std::string>& enabled,
-    std::function<void(const std::wstring&)> log) : logger(std::move(log)) {
+    std::function<void(const std::wstring&)> log,
+    std::function<void(const std::string&, const Json&)> onAction) : logger(std::move(log)), action(std::move(onAction)) {
     host = {sizeof(host), MEMESTUDIO_PLUGIN_ABI, this,
         [](void* context, const char* message) {
             try {
                 auto& self = *static_cast<Plugins*>(context);
                 if (self.logger && message) self.logger(wide(std::string(message, strnlen_s(message, 4096))));
+            } catch (...) {}
+        },
+        [](void* context, const char* plugin, const char* payload) {
+            try {
+                auto& self = *static_cast<Plugins*>(context);
+                if (!self.action || !plugin || !payload) return;
+                size_t length = strnlen_s(payload, 256 * 1024 + 1);
+                if (length > 256 * 1024) return;
+                auto result = Json::parse(payload, payload + length);
+                if (result.is_object()) self.action(std::string(plugin, strnlen_s(plugin, 128)), result);
             } catch (...) {}
         }};
     std::set<std::string> loaded;
