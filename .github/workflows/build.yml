@@ -16,7 +16,13 @@ concurrency:
 
 jobs:
   build:
-    name: Windows x64 application
+    name: Windows ${{ matrix.architecture }} application
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+          - architecture: arm64
     runs-on: windows-2022
     timeout-minutes: 15
     defaults:
@@ -28,16 +34,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Build application and plugins
-        run: .\build.ps1
+        run: .\build.ps1 -Architecture ${{ matrix.architecture }} -HostArchitecture x64
       - name: Package application and plugins
-        run: .\package.ps1
+        run: .\package.ps1 -Architecture ${{ matrix.architecture }}
       - name: Upload Windows packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: MemeConvertStudio-Windows-x64
+          name: MemeConvertStudio-Windows-${{ matrix.architecture }}
           path: |
-            MemeStudio-Windows-x64.zip
-            MemeStudio-Plugins.zip
+            MemeStudio-Windows-${{ matrix.architecture }}.zip
+            MemeStudio-Plugins-${{ matrix.architecture }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

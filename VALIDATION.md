@@ -226,3 +226,14 @@
   确认宽屏及紧凑窗口的分隔条、预览、输入框和按钮布局正常。
 - 未运行后端完整回归、真实供应商或付费 API 请求，未修改用户保存的设置。
 
+2026-11-16 Windows ARM64 构建支持增量：
+
+- `build.ps1` / `package.ps1` 新增 `-Architecture arm64`，构建和插件输出隔离在
+  `bin/arm64`；GitHub Actions 增加 x64 与 ARM64 矩阵并上传各自压缩包。
+- 在本机 x64 Windows 使用 MSVC ARM64 交叉工具链成功构建主程序和全部 7 个插件，
+  并用 `dumpbin /headers` 验证所有 PE 文件的 Machine 为 ARM64 (`AA64`)。
+  `package.ps1 -Architecture arm64` 打包成功，产物为
+  `MemeStudio-Windows-arm64.zip` 与 `MemeStudio-Plugins-arm64.zip`。
+- PowerShell 构建脚本语法解析通过；未在 ARM64 原生 Windows 上运行程序，
+  运行时验证留给目标设备与 GitHub Actions 构建环境。
+

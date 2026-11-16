@@ -4,7 +4,7 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 ## 启动
 
-支持 Windows 10/11 x64。获取源码后，在 Visual Studio Developer PowerShell 中运行：
+支持 Windows 10/11 x64 和 ARM64。获取源码后，在 Visual Studio Developer PowerShell 中运行：
 
 ```powershell
 .\build.ps1
@@ -290,11 +290,11 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 
 `main` 分支推送、面向 `main` 的 PR 会自动运行 `Build Windows`；
 也可在仓库 Actions 页面选择该工作流并点击 `Run workflow`。
-使用 Windows x64 环境，直接执行 `build.ps1` 和 `package.ps1`，只编译打包，
+分别构建 x64 与 ARM64，仅编译打包，
 不运行完整测试、不调用图像供应商，也不需要配置 API Key。
 
-成功后在运行详情页的 Artifacts 下载 `MemeConvertStudio-Windows-x64`，
-其中包含完整应用包 `MemeStudio-Windows-x64.zip` 和插件包 `MemeStudio-Plugins.zip`。
+成功后在运行详情页的 Artifacts 下载 `MemeConvertStudio-Windows-x64` 或
+`MemeConvertStudio-Windows-arm64`，其中包含相应架构的完整应用包与插件包。
 构建产物保存 14 天。同一分支新提交会取消旧构建。
 
 七个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
@@ -304,6 +304,25 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 ### 本地构建
 
 需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。
+
+默认构建 x64。ARM64 Windows 开发机可运行 `build.ps1 -Architecture arm64 -HostArchitecture arm64`；
+也可在 x64 Windows 上安装 ARM64 C++ 工具并交叉编译：
+
+```powershell
+.\build.ps1 -Architecture arm64 -HostArchitecture x64
+.\package.ps1 -Architecture arm64
+```
+
+ARM64 构建输出至 `bin\arm64\MemeStudio-arm64.exe`，对应架构插件位于同级 `plugins`。
+`-Test` 会尝试在当前主机运行构建结果；交叉构建时仅当主机支持 ARM64 仿真才使用。
+也可用 CMake 构建 ARM64：
+
+```powershell
+cmake -S . -B build-cmake-arm64 -A ARM64
+cmake --build build-cmake-arm64 --config Release
+```
+
+GitHub Actions 在 `windows-2022` 上分别原生构建 x64，并交叉编译 ARM64。
 
 ```powershell
 .\build.ps1 -Test
