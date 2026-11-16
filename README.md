@@ -5,6 +5,22 @@ MemeConvertStudio 可选插件。原生 C++ DLL 管理本地 Qwen-Image 服务�
 提供带 Bearer Key 的 OpenAI 兼容图片接口。
 插件默认关闭；加载成功后主窗口才显示“Qwen-Image…”。
 
+## 项目归属与鸣谢
+
+- Diffusers 管线和部署流程参考 [Qwen-Image](https://github.com/QwenLM/Qwen-Image)；
+  Qwen 模型代码与权重分别遵循其上游仓库、模型卡及权重所声明的许可。
+- GGUF 原生推理由用户提供或插件按需获取的
+  [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) 提供；
+  上游项目采用 MIT 许可。该运行时不随本插件源代码提交。
+- 本仓库包含 [nlohmann/json](https://github.com/nlohmann/json)，采用 MIT 许可，
+  版权声明及完整许可文本见 `vendor/nlohmann/LICENSE.MIT`。
+- Python 图像处理使用 Pillow；PyTorch、Diffusers、Transformers、Accelerate
+  等按所选环境安装，各组件许可以对应发行包为准。
+
+本插件不会替用户再分发模型权重，也不代表与上述项目存在官方合作关系。
+完整许可核对说明见主仓库的
+[第三方项目与鸣谢](https://github.com/IFoliageI/MemeConvertStudio/blob/main/THIRD_PARTY.md)。
+
 ## 开始使用
 
 1. 将完整插件目录放到 EXE 旁的 `plugins/qwen-image/`，在“插件管理”勾选并应用。
