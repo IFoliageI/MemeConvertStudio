@@ -12,7 +12,7 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 
 构建需要 Visual Studio 的“使用 C++ 的桌面开发”工作负载及 Windows SDK。成功后启动 `bin\MemeStudio.exe`。程序使用静态 C++ 运行库，不需要 Qt、Python、FFmpeg 或额外运行时。仓库跟踪源码，不跟踪本地 `bin/` 构建产物；构建和打包说明见“构建与测试”。
 
-完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有七个精简插件分支；它们不包含应用宿主源码或其他插件：
+完整应用源码、SDK 和整合构建流程位于 `main` 分支。为了让单个插件可独立查看和构建，仓库另有八个精简插件分支；它们不包含应用宿主源码或其他插件：
 
 - [`plugin-example`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-example)：示例提示词插件。
 - [`plugin-local-redraw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-local-redraw)：局部重绘命令插件。
@@ -21,8 +21,28 @@ MemeConvertStudio 是 Windows 原生 C++20 表情包与 GIF 人物替换工具�
 - [`plugin-prompt-draw`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-prompt-draw)：纯提示词及可选画风参考的无图绘制插件。
 - [`plugin-api-parameter-test`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-parameter-test)：逐项探测模型、端点及已配置图像参数的支持情况。
 - [`plugin-api-load-balancing`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-load-balancing)：多 API / Key 权重均衡、分级灾备及效果对比。
+- [`plugin-qwen-image`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-qwen-image)：本地 Qwen-Image，支持原生 GGUF / Vulkan 和 Diffusers 推理、环境配置、模型驻留与 OpenAI 兼容端点。
 
-每个插件分支只包含对应插件的 `plugin.cpp`、`plugin.json`、最小 ABI 头文件、单插件 `build.ps1`、专属 README 和自动编译工作流。运行构建脚本会在 `dist/plugins/<插件目录>/` 生成可安装的 DLL 与清单。局部重绘、超分、批量转换、无图绘制和参数测试插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
+每个插件分支只包含对应插件、必要支持代码、最小 ABI 头文件、单插件 `build.ps1`、专属 README 和自动编译工作流。运行构建脚本生成可安装的 DLL 与清单。Qwen 插件另外包含本地服务脚本和 JSON 库。局部重绘、超分、批量转换、无图绘制和参数测试插件是宿主工作流的入口适配器，需使用包含对应服务的 MemeConvertStudio 主程序；它们不会将宿主实现复制进插件仓库。
+
+## 本地 Qwen-Image
+
+加载“本地模型支持 - Qwen-Image”后，顶部出现“Qwen-Image…”。可自定义模型目录、
+Python、环境名或复用已有虚拟环境，默认在插件文件夹内建立 `.env`。
+一键安装仅配置推理依赖，不安装系统驱动、CUDA/HIP/ROCm 工具链或模型权重。
+
+- **GGUF**：使用 stable-diffusion.cpp 原生 C++ 推理，自动配置 Vulkan / CPU，
+  可显式选 CUDA 或已有运行时；适合已有 AMD Vulkan 驱动的环境。
+  “GGUF…”中可选择扩散模型、VAE、编码器及 mmproj，支持多图编辑与流式采样预览。
+- **Diffusers**：支持 Qwen-Image 文生图、Edit 单图及 EditPlus 多图编辑；
+  人物替换及额外参考请选择多图编辑模型。复用已有可用 GPU PyTorch，
+  或配置 NVIDIA CUDA / Intel XPU / CPU 推理依赖。
+- 自定义 OpenAI 兼容端口与 Key，默认仅本机访问，可选择局域网监听。
+  可保留模型加速下次生成，或逐次释放；支持手动卸载、停止服务及崩溃清理。
+  开启聚合网关时可将本地端点添加到供应商池。
+
+GGUF 编码器加 mmproj 不等于完整图像模型，仍需对应扩散模型与 VAE。
+启动前可点“检查”查看缺少的组件。详见 [插件说明](plugins/qwen-image/README.md)。
 
 1. 导入原始表情，或将一个文件拖入“原始表情”区域，支持 PNG、JPEG、GIF、BMP、TIFF；其他格式取决于本机 WIC 解码器。
 2. 导入人物截图或立绘，也可以直接拖入“参考人物”区域。在人物预览上拖出矩形，可以只使用截图中的人物区域；“重置裁剪”恢复完整图片。
@@ -297,9 +317,10 @@ GIF 使用 `.gif`。请求估算包含所有份数；生成完成后在“结果
 `MemeConvertStudio-Windows-arm64`，其中包含相应架构的完整应用包与插件包。
 构建产物保存 14 天。同一分支新提交会取消旧构建。
 
-七个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
+八个 `plugin-*` 分支各自包含 `Build Plugin` 工作流，推送、PR 或手动操作时
 只构建该分支对应插件。下载其 `MemeStudio-Plugin-Windows-x64`，
 将解压后的 `plugins` 目录放到兼容的主程序旁。工作流不创建 GitHub Release。
+Qwen 插件工作流分别生成 x64/ARM64 产物，目录为 `dist/<架构>/plugins/qwen-image/`。
 
 ### 本地构建
 

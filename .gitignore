@@ -12,3 +12,11 @@
 /MemeStudio-Plugins-arm64.zip
 *.part
 *.memestudio/
+**/__pycache__/
+**/.env/
+**/qwen-settings.json
+**/qwen-settings.tmp
+**/qwen-runtime.log
+**/qwen-ready-*.json
+**/runtime-constraints.txt
+/plugins/qwen-image/runtime/

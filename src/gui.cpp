@@ -33,7 +33,7 @@ enum Id {
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
     GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
     SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry, RoutingEntry,
-    GatewayUrlDisplay, GatewayKeyDisplay
+    GatewayUrlDisplay, GatewayKeyDisplay, QwenEntry
 };
 struct State;
 struct View {
@@ -951,13 +951,40 @@ static void dropFiles(State& state, HDROP drop, int kind) {
 static void start(State& state, const Job* refinement = nullptr);
 static void startApiParameterTest(State& state);
 static void configureRouting(State& state);
+static void applyQwenEndpoint(State& state, const Json& result) {
+    if (result.value("action", "") != "qwen_endpoint") return;
+    auto url = wide(result.at("base_url").get<std::string>());
+    auto key = wide(result.at("key").get<std::string>());
+    auto model = result.at("model").get<std::string>();
+    if (state.gatewayEnabled()) {
+        auto found = std::find_if(state.routing.channels.begin(), state.routing.channels.end(),
+            [&](const auto& channel) { return channel.name == "Local Qwen-Image"; });
+        ApiChannel channel; channel.name = "Local Qwen-Image"; channel.baseUrl = url;
+        channel.key = key; channel.model = model;
+        if (found == state.routing.channels.end()) {
+            if (state.routing.channels.size() >= 64) throw Error("供应商池已满，请移除渠道后重新应用");
+            state.routing.channels.push_back(channel);
+        } else *found = channel;
+        state.logLine(L"Qwen-Image 本地端点已添加到供应商池；请在均衡灾备中设置权重与优先级");
+    } else {
+        state.set(state.get(BaseUrl), url); state.set(state.get(Key), key);
+        state.set(state.get(Model), wide(model));
+        state.logLine(L"已应用 Qwen-Image 本地端点；插件停用或程序退出后服务将停止");
+    }
+    saveSettings(state);
+}
+static void configureQwen(State& state) {
+    if (state.busy || !state.pluginEnabled("memestudio.qwen-image")) return;
+    applyQwenEndpoint(state, state.plugins->command("memestudio.qwen-image", "configure", Json::object(), state.window));
+}
 static void updatePluginEntries(State& state) {
     int x = 380;
     for (const auto& [id, plugin] : {
         std::pair{RefineEntry, "memestudio.local-redraw"},
         std::pair{DrawingEntry, "memestudio.prompt-draw"},
         std::pair{ApiTestEntry, "memestudio.api-parameter-test"},
-        std::pair{RoutingEntry, "memestudio.api-load-balancing"}}) {
+        std::pair{RoutingEntry, "memestudio.api-load-balancing"},
+        std::pair{QwenEntry, "memestudio.qwen-image"}}) {
         auto entry = GetDlgItem(state.window, id);
         bool loaded = state.pluginEnabled(plugin);
         if (loaded) {
@@ -1147,6 +1174,9 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
                 if (info.id != "memestudio.api-load-balancing") throw Error("仅 API 均衡插件可启动路由配置");
                 configureRouting(state);
                 return TRUE;
+            }
+            if (info.id == "memestudio.qwen-image" && result.value("action", "") == "qwen_endpoint") {
+                applyQwenEndpoint(state, result); return TRUE;
             }
             if (result.value("action", "") == "refine") {
                 Job job; job.source = state.resultPath;
@@ -1515,6 +1545,7 @@ static void initialize(State& state) {
     button(DrawingEntry, L"无图绘制…", 510, 15, 120);
     button(ApiTestEntry, L"API 参数测试…", 640, 15, 120);
     button(RoutingEntry, L"API 均衡灾备…", 770, 15, 120);
+    button(QwenEntry, L"Qwen-Image…", 900, 15, 120);
     state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
         WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
     ShowWindow(state.resultChoice, SW_HIDE);
@@ -1587,6 +1618,7 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == QwenEntry && !state.busy) { configureQwen(state); return; }
     if (id == RoutingEntry && !state.busy) { configureRouting(state); return; }
     if (id == ApiTestEntry && !state.busy) { startApiParameterTest(state); return; }
     if (id == DrawingEntry && !state.busy) {
@@ -2005,6 +2037,13 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
                 .value("action", "") != "api_routing") throw Error("Routing plugin entry failed");
         applyPlugins(state, {});
         if (visible(RoutingEntry)) throw Error("Routing entry visible after unloading");
+        if (visible(QwenEntry)) throw Error("Qwen entry visible without plugin");
+        applyPlugins(state, {"memestudio.qwen-image"});
+        if (!visible(QwenEntry) || !IsWindowEnabled(GetDlgItem(window, QwenEntry)))
+            throw Error("Qwen plugin entry failed");
+        applyPlugins(state, {});
+        if (visible(QwenEntry)) throw Error("Qwen entry visible after unloading");
+        report["qwen_plugin_visibility"] = "passed";
         auto savedInstruction = state.text(state.instruction);
         applyPlugins(state, {"memestudio.example"});
         if (state.plugins->fingerprint().size() != 1 ||
@@ -2050,7 +2089,8 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         if (IsWindowEnabled(GetDlgItem(window, DrawingEntry))) throw Error("Disabled drawing entry is active");
         report["drawing_plugin"] = "passed";
         checkPluginVisibility(false, false, false);
-        applyPlugins(state, {"memestudio.local-redraw", "memestudio.prompt-draw", "memestudio.batch-convert", "memestudio.api-parameter-test"});
+        applyPlugins(state, {"memestudio.local-redraw", "memestudio.prompt-draw", "memestudio.batch-convert",
+            "memestudio.api-parameter-test", "memestudio.api-load-balancing", "memestudio.qwen-image"});
         checkPluginVisibility(true, true, true);
         snapshot(1120, 830, L"ui-plugins-enabled.png");
         state.busy = true;

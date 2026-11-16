@@ -27,13 +27,18 @@ try {
     $command = 'call "' + $developerCommand + '" -arch=' + $Architecture + ' -host_arch=' + $HostArchitecture + ' >nul && cl /nologo /std:c++20 /MP4 /O2 /EHsc /utf-8 /MT /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN ' + $arguments + ' /Fe:"' + $executable + '" /link ' + $libraries + ' /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup /MANIFEST:EMBED /MANIFESTINPUT:"' + $project + '\src\app.manifest"'
     & $env:ComSpec /d /s /c $command
     if ($LASTEXITCODE -ne 0) { throw "C++ build failed." }
-    foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert", "prompt-draw", "api-parameter-test", "api-load-balancing")) {
+    foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert", "prompt-draw", "api-parameter-test", "api-load-balancing", "qwen-image")) {
         $pluginOutput = Join-Path $outputDirectory "plugins\$pluginName"
         New-Item -ItemType Directory -Force -Path $pluginOutput | Out-Null
-        $pluginCommand = 'call "' + $developerCommand + '" -arch=' + $Architecture + ' -host_arch=' + $HostArchitecture + ' >nul && cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MT /W4 /LD "' + $project + '\plugins\' + $pluginName + '\plugin.cpp" /Fo:' + $pluginName + '-plugin.obj /Fe:"' + $pluginOutput + '\' + $pluginName + '.dll" /link /IMPLIB:' + $pluginName + '-plugin.lib'
+        $pluginCommand = 'call "' + $developerCommand + '" -arch=' + $Architecture + ' -host_arch=' + $HostArchitecture + ' >nul && cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MT /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /LD "' + $project + '\plugins\' + $pluginName + '\plugin.cpp" /Fo:' + $pluginName + '-plugin.obj /Fe:"' + $pluginOutput + '\' + $pluginName + '.dll" /link user32.lib gdi32.lib ole32.lib uuid.lib winhttp.lib crypt32.lib bcrypt.lib /IMPLIB:' + $pluginName + '-plugin.lib'
         & $env:ComSpec /d /s /c $pluginCommand
         if ($LASTEXITCODE -ne 0) { throw "$pluginName plugin build failed." }
         Copy-Item -LiteralPath "$project\plugins\$pluginName\plugin.json" -Destination $pluginOutput -Force
+        if ($pluginName -eq "qwen-image") {
+            foreach ($file in @("server.py", "environment.py", "model_info.py", "sdcpp_backend.py", "requirements.txt", "README.md")) {
+                Copy-Item -LiteralPath (Join-Path $project "plugins\qwen-image\$file") -Destination $pluginOutput -Force
+            }
+        }
     }
     if ($Test) {
         $process = Start-Process -FilePath $executable -ArgumentList @("--self-test", "$project\tmp\tests") -WindowStyle Hidden -PassThru -Wait

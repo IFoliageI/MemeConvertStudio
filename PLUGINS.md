@@ -74,13 +74,30 @@ frame_count 为 1，variation_index 区分生成副本。
 ## 构建
 
 `.\build.ps1` 同时构建程序与 `example`、`local-redraw`、`waifu2x`、
-`batch-convert`、`prompt-draw`、`api-parameter-test`、`api-load-balancing` 七个插件，分别放到 `bin/plugins/<插件目录>`。
-CMake 也会复制七个插件到程序旁。
+`batch-convert`、`prompt-draw`、`api-parameter-test`、`api-load-balancing`、
+`qwen-image` 八个插件，分别放到 `bin/plugins/<插件目录>`。
+CMake 也会复制八个插件及其服务资源到程序旁。
 SDK 不依赖 OpenAI SDK 或第三方框架。
 
 命令行任务可设置 `"plugins":["memestudio.example"]`；
 可选 `"plugin_directory":"D:/my-plugins"` 指定其他插件目录。
 不填写 plugins 时不加载插件。CLI 遇到不可用插件会直接报错。
+
+## 本地 Qwen-Image
+
+插件 ID `memestudio.qwen-image`。`configure` 打开独立设置窗口，`stop` 停止服务。
+`configure` 的“应用端点到主界面”返回
+`{"action":"qwen_endpoint","base_url":"http://127.0.0.1:8189/v1","key":"...","model":"qwen-image-local"}`。
+宿主仅在该插件成功加载后显示入口；返回值应用到普通 API 设置或聚合网关供应商池。
+
+插件负责环境安装、模型检查、本地服务与推理子进程，宿主不包含 PyTorch/模型推理实现。
+GGUF 走 stable-diffusion.cpp 原生引擎，标准目录走 Diffusers；默认懒加载模型。
+DLL 卸载与宿主崩溃由 Windows Job Object 清理整个进程树。
+命令返回的 Key 不得记入日志。插件设置使用 Windows DPAPI 保存 Key。
+
+独立 `plugin-qwen-image` 分支包含完整插件服务与单插件 x64/ARM64 构建，
+不含宿主源码及其他插件。运行时、虚拟环境、模型和本地设置不随源代码提交。
+安装、模型组件、API 参数与限制见 [Qwen 插件说明](plugins/qwen-image/README.md)。
 
 ## API 负载均衡与灾备
 

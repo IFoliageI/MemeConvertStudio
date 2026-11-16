@@ -13,18 +13,29 @@ if (!$Executable) {
 if (!(Test-Path -LiteralPath $executable)) { throw "Run build.ps1 first." }
 $package = Join-Path $project "dist\MemeStudio"
 New-Item -ItemType Directory -Force -Path $package,(Join-Path $package "bin") | Out-Null
-foreach ($name in @("src", "tests", "vendor", "sdk", "plugins")) {
+foreach ($name in @("src", "tests", "vendor", "sdk")) {
     Copy-Item -LiteralPath (Join-Path $project $name) -Destination $package -Recurse -Force
 }
 foreach ($name in @("README.md", "PLUGINS.md", "VALIDATION.md", "CMakeLists.txt", "build.ps1", "package.ps1", ".gitignore")) {
     Copy-Item -LiteralPath (Join-Path $project $name) -Destination $package -Force
 }
 Copy-Item -LiteralPath $executable -Destination (Join-Path $package "bin\MemeStudio.exe") -Force
-foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert", "prompt-draw", "api-parameter-test", "api-load-balancing")) {
+foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert", "prompt-draw", "api-parameter-test", "api-load-balancing", "qwen-image")) {
+    $sourceOutput = Join-Path $package "plugins\$pluginName"
+    New-Item -ItemType Directory -Force -Path $sourceOutput | Out-Null
+    foreach ($name in @("plugin.cpp", "plugin.json")) {
+        Copy-Item -LiteralPath (Join-Path $project "plugins\$pluginName\$name") -Destination $sourceOutput -Force
+    }
     $pluginOutput = Join-Path $package "bin\plugins\$pluginName"
     New-Item -ItemType Directory -Force -Path $pluginOutput | Out-Null
     foreach ($name in @("$pluginName.dll", "plugin.json")) {
         Copy-Item -LiteralPath (Join-Path $binaryDirectory "plugins\$pluginName\$name") -Destination $pluginOutput -Force
+    }
+    if ($pluginName -eq "qwen-image") {
+        foreach ($file in @("server.py", "environment.py", "model_info.py", "sdcpp_backend.py", "requirements.txt", "README.md")) {
+            Copy-Item -LiteralPath (Join-Path $binaryDirectory "plugins\qwen-image\$file") -Destination $pluginOutput -Force
+            Copy-Item -LiteralPath (Join-Path $project "plugins\qwen-image\$file") -Destination $sourceOutput -Force
+        }
     }
 }
 $archive = Join-Path $project "MemeStudio-Windows-$Architecture.zip"

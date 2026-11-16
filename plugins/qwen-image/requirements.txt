@@ -1,0 +1,9 @@
+diffusers>=0.35.1
+transformers>=4.51.3,<5
+accelerate>=1.2
+safetensors>=0.4
+Pillow>=10.4
+sentencepiece>=0.2
+protobuf>=4.25
+packaging>=24
+torchvision
