@@ -1,4 +1,19 @@
-# 插件开发
+# 插件开发与集成说明
+
+本文件面向插件作者、发行维护者和需要通过命令行集成插件的用户。它说明
+插件目录格式、C ABI、宿主回调、构建方式和各内置插件的边界；普通使用者
+应先阅读 [README.md](README.md)。
+
+## 快速导航
+
+- [运行时模型](#运行时模型)
+- [清单](#清单)
+- [C ABI](#c-abi)
+- [构建](#构建)
+- [内置插件](#内置插件)
+- [安全与兼容性](#安全与兼容性)
+
+## 运行时模型
 
 插件是与主程序同架构的 Windows DLL（x64 或 ARM64），只启用你信任的插件。安装位置为程序 EXE 同级的
 `plugins/<插件目录>/`，包含 `plugin.json`、DLL 和插件自身需要的资源。
@@ -87,7 +102,14 @@ SDK 不依赖 OpenAI SDK 或第三方框架。
 可选 `"plugin_directory":"D:/my-plugins"` 指定其他插件目录。
 不填写 plugins 时不加载插件。CLI 遇到不可用插件会直接报错。
 
-## 本地 Qwen-Image
+## 内置插件
+
+主仓库目前包含八个插件：`example`、`local-redraw`、`waifu2x`、
+`batch-convert`、`prompt-draw`、`api-parameter-test`、
+`api-load-balancing` 和 `qwen-image`。每个插件的功能、外部依赖和独立分支
+见主 README 的插件表；本节只记录宿主接口和配置边界。
+
+### 本地 Qwen-Image
 
 插件 ID `memestudio.qwen-image`。`configure` 打开独立设置窗口，`stop` 停止服务。
 `configure` 的“应用端点到主界面”返回
@@ -103,7 +125,7 @@ DLL 卸载与宿主崩溃由 Windows Job Object 清理整个进程树。
 不含宿主源码及其他插件。运行时、虚拟环境、模型和本地设置不随源代码提交。
 安装、模型组件、API 参数与限制见 [Qwen 插件说明](plugins/qwen-image/README.md)。
 
-## API 负载均衡与灾备
+### API 负载均衡与灾备
 
 插件 ID：`memestudio.api-load-balancing`，命令 `configure-routing` 返回
 `{"action":"api_routing"}`。DLL 只提供入口，配置、凭据、调度、统计和对比由宿主执行。
@@ -188,7 +210,7 @@ CLI 在原有任务配置增加以下字段；不在 JSON 中填写明文 Key，
 GUI 的加密凭据只能由当前 Windows 用户解密；CLI 只读取环境变量。
 每次新任务重置路由健康和份额统计，同一多源批次共享一个路由器。
 
-## API 参数支持测试
+### API 参数支持测试
 
 1.1 版增加逐项与整轮的预估 Token：
 `estimated_prompt_text_tokens_per_request` 和 `estimated_prompt_text_tokens_total`
@@ -235,7 +257,7 @@ HTTP 成功仅说明供应商接受该调用，不证明画质、压缩质量或
 
 报告可从窗口导出 JSON。独立 `plugin-api-parameter-test` 分支仅包含该插件及其单插件构建文件。
 
-## 无图绘制
+### 无图绘制
 
 插件 ID 为 `memestudio.prompt-draw`，默认关闭。启用后点击主窗口顶部
 “无图绘制…”或执行插件命令“通过提示词绘制…”。命令 `draw` 返回
@@ -281,7 +303,7 @@ CLI 需显式启用插件；不与 sources 队列或局部重绘模式组合。
 其他启用插件的提示词与最终图回调仍执行，context.mode 为 generate。
 本插件只有菜单命令，不自行修改提示词或像素。
 
-## 局部重绘
+### 局部重绘
 
 在插件管理中勾选“局部重绘”并应用，然后执行“局部重绘当前产物…”；
 启用后，主窗口顶部也有“局部重绘…”快捷入口。
@@ -306,7 +328,7 @@ PNG 保留选区外原像素和 Alpha。GIF 在合成后重新量化为 256 色�
 不会覆盖作为输入的产物；可逐次对新的结果继续修正。
 取消窗口不会发起 API 请求。生成阶段可使用主窗口“取消”。
 
-## 批量转换
+### 批量转换
 
 插件 ID 为 `memestudio.batch-convert`，默认关闭。启用后，源素材支持多选文件、
 拖入多个图片/GIF/文件夹，或从“目录”选择文件夹。文件夹导入当前层级，
@@ -341,7 +363,7 @@ DLL 不重复实现网络和图像处理，也不改变提示词或缓存标识�
 队列共享当前人物、画风、参数与可选超分。失败或取消后停止后续任务，
 重跑相同队列可复用缓存。整个队列会先检查输出路径，不允许覆盖任何输入素材。
 
-## Waifu2x 输入/输出超分
+### Waifu2x 输入/输出超分
 
 插件 ID 为 `memestudio.waifu2x`，对接
 [nihui/waifu2x-ncnn-vulkan](https://github.com/nihui/waifu2x-ncnn-vulkan) 的本机命令行。
@@ -418,3 +440,15 @@ waifu2x-ncnn-vulkan.exe -i <临时输入.png> -o <临时输出.png> -s 2 -n 0 -t
 `mode=refine` 时不需要 character，省略 region 表示全图，
 默认 stride=1、max_frames=0；不得抽帧。普通人物替换任务也可使用 upscale。
 CLI 显式指定的 upscale 不受 GUI 插件启停状态影响。
+
+## 安全与兼容性
+
+- 插件 DLL 必须与宿主使用相同架构（x64 或 ARM64）和兼容的 ABI 版本。
+- 插件不会收到供应商密钥；需要网络访问的功能由宿主或插件自己的配置负责。
+- 不要在 `DllMain`、后台线程退出后或 `shutdown` 返回后调用宿主回调。
+- 独立插件分支不包含主程序实现；安装时必须将插件放入兼容主程序的
+  `plugins/<插件目录>/`。
+- Qwen 模型、Python 环境、stable-diffusion.cpp 运行时和 Waifu2x 程序不随
+  插件源代码分发。其许可证和再分发要求见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+- 更新插件外部配置或资源时，应递增清单 `version`，否则宿主可能继续复用
+  旧的帧缓存。
