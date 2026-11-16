@@ -1,5 +1,10 @@
 # MemeConvertStudio API 负载均衡与灾备插件
 
+本文件说明插件安装、模型目录、分流和灾备边界。宿主源码、C ABI 与完整命令行
+配置见主仓库 `main` 分支的 [README](https://github.com/IFoliageI/MemeConvertStudio/blob/main/README.md)
+和 [PLUGINS.md](https://github.com/IFoliageI/MemeConvertStudio/blob/main/PLUGINS.md)。
+本插件只提供宿主命令入口，不复制或重新分发第三方图像服务或模型。
+
 本分支只包含 `memestudio.api-load-balancing` 插件入口、ABI 头、单插件构建脚本和
 GitHub Actions。完整应用及路由服务位于同仓库的 `main` 分支。
 需要包含 API 路由服务的新版宿主；旧宿主仅安装 DLL 无法获得此功能。
