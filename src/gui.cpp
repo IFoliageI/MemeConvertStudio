@@ -4,6 +4,7 @@
 #include "batch.hpp"
 #include "api_probe.hpp"
 #include "api_routing.hpp"
+#include "dsh.hpp"
 #include "panels.hpp"
 #include <commctrl.h>
 #include <commdlg.h>
@@ -25,6 +26,7 @@ constexpr UINT WM_PROGRESS = WM_APP + 1, WM_FINISHED = WM_APP + 2;
 constexpr UINT WM_PLUGIN_ACTION = WM_APP + 121;
 constexpr int settingsHeight = 1210;
 constexpr int minimumLeftWidth = 242, minimumRightWidth = 332, minimumCanvasWidth = 400;
+constexpr int pluginBarLeft = 330, pluginButtonWidth = 120, pluginButtonGap = 5;
 constexpr COLORREF ink = RGB(34, 39, 43), muted = RGB(104, 113, 120);
 constexpr COLORREF paper = RGB(245, 247, 248), line = RGB(218, 224, 227);
 enum Id {
@@ -35,7 +37,7 @@ enum Id {
     FetchModels, Complexity, OutputFormat, Compression, Streaming, PartialImages,
     GenerationCount, CountSpin, PluginManage, ResultChoice, RefineEntry, InstructionPresets,
     SourceFolder, SourcePrevious, SourceNext, SourcePosition, SourceTotal, DrawingEntry, ApiTestEntry, RoutingEntry,
-    GatewayUrlDisplay, GatewayKeyDisplay, QwenEntry
+    GatewayUrlDisplay, GatewayKeyDisplay, QwenEntry, DshEntry
 };
 struct State;
 struct View {
@@ -81,7 +83,11 @@ struct State {
     size_t sourceIndex = 0;
     std::vector<PluginInfo> availablePlugins;
     std::vector<std::string> enabledPlugins;
+    PluginSignaturePolicy pluginSignaturePolicy = PluginSignaturePolicy::Disabled;
     std::shared_ptr<Plugins> plugins;
+    std::unique_ptr<DshBridge> dsh;
+    DshPolicy dshPolicy;
+    std::shared_ptr<DshUsage> dshUsage;
     UpscaleOptions upscale;
     RoutingOptions routing;
     std::vector<PoolModel> modelChoices;
@@ -123,6 +129,7 @@ struct State {
     }
     bool batchEnabled() const { return pluginEnabled("memestudio.batch-convert"); }
     bool gatewayEnabled() const { return gatewayActive(pluginEnabled("memestudio.api-load-balancing"), routing); }
+    bool dshActive() const { return dsh && dsh->active(); }
     void refreshViews() {
         frame = 0; elapsed = 0;
         for (auto& view : views) { view.zoom = 1; view.panX = view.panY = 0; }
@@ -813,6 +820,23 @@ static void updateProviderControls(State& state) {
     EnableWindow(state.get(Remember), !state.busy && !gateway);
     EnableWindow(state.get(FetchModels), !state.busy);
 }
+static const char* pluginSignatureSetting(PluginSignaturePolicy policy) {
+    switch (policy) {
+    case PluginSignaturePolicy::Disabled: return "disabled";
+    case PluginSignaturePolicy::Trusted: return "trusted";
+    case PluginSignaturePolicy::SameSigner: return "same_signer";
+    }
+    return "same_signer";
+}
+static void loadPluginSignatureSetting(State& state, const Json& setting) {
+    for (auto policy : {PluginSignaturePolicy::Disabled, PluginSignaturePolicy::Trusted, PluginSignaturePolicy::SameSigner})
+        if (setting == pluginSignatureSetting(policy)) {
+            state.pluginSignaturePolicy = policy;
+            return;
+        }
+    state.pluginSignaturePolicy = PluginSignaturePolicy::SameSigner;
+    state.logLine(L"插件签名验证设置无效，已采用与主程序签名一致的策略");
+}
 static void saveSettings(State& state) {
     if (state.demo) return;
     Json data;
@@ -823,8 +847,10 @@ static void saveSettings(State& state) {
     for (int id : {Consistency, PreserveText, Resume, Remember, Streaming}) data[std::to_string(id)] = state.checked(id);
     if (state.checked(Remember)) data["encrypted_key"] = protect(state.text(state.get(Key)));
     data["enabled_plugins"] = state.enabledPlugins;
+    data["plugin_signature_policy"] = pluginSignatureSetting(state.pluginSignaturePolicy);
     data["upscale"] = upscaleJson(state.upscale);
     data["api_routing"] = routingJson(state.routing, true);
+    data["dsh_policy"] = dshPolicyJson(state.dshPolicy);
     data["sidebar_widths"] = {{"left", state.leftWidth}, {"right", state.rightWidth}};
     writeJson(settingsPath(), data);
 }
@@ -833,6 +859,12 @@ static void loadSettings(State& state) {
     try {
         if (!fs::exists(settingsPath())) return;
         Json data = readJson(settingsPath());
+        if (data.contains("plugin_signature_policy"))
+            loadPluginSignatureSetting(state, data["plugin_signature_policy"]);
+        if (data.contains("dsh_policy")) {
+            try { state.dshPolicy = dshPolicyFromJson(data["dsh_policy"]); }
+            catch (const std::exception&) { state.logLine(L"Harness 权限配置无效，已采用默认拒绝策略"); }
+        }
         if (data.contains("sidebar_widths") && data["sidebar_widths"].is_object()) {
             const auto& panes = data["sidebar_widths"];
             state.leftWidth = std::clamp(panes.value("left", minimumLeftWidth), minimumLeftWidth, 1200);
@@ -1014,21 +1046,37 @@ static void acceptPanelJob(State& state, const Job& job) {
     if (state.busy) throw Error("主界面有任务正在运行，请完成或取消后再生成");
     start(state, &job);
 }
+static void configureDsh(State& state) {
+    if (!state.pluginEnabled(dshPlugin)) return;
+    showDshPermissions(state.instance, state.window, state.dshPolicy, state.dshUsage, [&state](const DshPolicy& next) {
+        if (!state.pluginEnabled(dshPlugin)) throw Error("DeepSeek Harness 插件已停用");
+        auto previous = state.dshPolicy;
+        if (dshPolicyJson(previous) == dshPolicyJson(next)) return;
+        state.dshPolicy = next;
+        try { saveSettings(state); }
+        catch (...) { state.dshPolicy = std::move(previous); throw; }
+        if (state.dshActive()) {
+            state.dsh->stopJob();
+            state.logLine(L"DeepSeek Harness 权限已保存，正在取消当前任务");
+        } else state.logLine(L"DeepSeek Harness 权限已保存");
+    });
+}
 static void updatePluginEntries(State& state) {
-    int x = 380;
+    int x = pluginBarLeft;
     for (const auto& [id, plugin] : {
         std::pair{RefineEntry, "memestudio.local-redraw"},
         std::pair{DrawingEntry, "memestudio.prompt-draw"},
         std::pair{ApiTestEntry, "memestudio.api-parameter-test"},
         std::pair{RoutingEntry, "memestudio.api-load-balancing"},
-        std::pair{QwenEntry, "memestudio.qwen-image"}}) {
+        std::pair{QwenEntry, "memestudio.qwen-image"},
+        std::pair{DshEntry, dshPlugin}}) {
         auto entry = GetDlgItem(state.window, id);
         bool loaded = state.pluginEnabled(plugin);
         if (loaded) {
-            MoveWindow(entry, x, 15, 120, 30, TRUE);
-            x += 130;
+            MoveWindow(entry, x, 15, pluginButtonWidth, 30, TRUE);
+            x += pluginButtonWidth + pluginButtonGap;
         }
-        EnableWindow(entry, loaded && !state.busy);
+        EnableWindow(entry, loaded && (!state.busy || id == DshEntry));
         ShowWindow(entry, loaded ? SW_SHOW : SW_HIDE);
     }
 }
@@ -1046,13 +1094,18 @@ static Job drawingOptions(State& state) {
     return job;
 }
 static void applyPlugins(State& state, const std::vector<std::string>& enabled) {
-    for (const auto& [id, key] : {std::pair{"memestudio.prompt-draw", "drawing"},
-        {"memestudio.local-redraw", "refine"}, {"memestudio.waifu2x", "upscale"},
-        {"memestudio.api-parameter-test", "probe"}, {"memestudio.api-load-balancing", "routing"}})
-        if (std::find(enabled.begin(), enabled.end(), id) == enabled.end()) {
-            destroyPanel(key);
-            if (std::string(key) == "routing") destroyPanel("comparison");
-        }
+    state.dsh.reset();
+    auto closeDisabledPanels = [](const std::vector<std::string>& active) {
+        for (const auto& [id, key] : {std::pair{"memestudio.prompt-draw", "drawing"},
+            {"memestudio.local-redraw", "refine"}, {"memestudio.waifu2x", "upscale"},
+            {"memestudio.api-parameter-test", "probe"}, {"memestudio.api-load-balancing", "routing"},
+            {dshPlugin, "dsh-permissions"}})
+            if (std::find(active.begin(), active.end(), id) == active.end()) {
+                destroyPanel(key);
+                if (std::string(key) == "routing") destroyPanel("comparison");
+            }
+    };
+    closeDisabledPanels(enabled);
     state.plugins.reset();
     state.enabledPlugins.clear();
     updateProviderControls(state);
@@ -1068,7 +1121,13 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
         auto event = std::make_unique<Json>(Json{{"plugin", plugin}, {"result", result}});
         if (IsWindow(window) && PostMessageW(window, WM_PLUGIN_ACTION, 0, LPARAM(event.get()))) event.release();
     };
-    state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger, action);
+    try {
+        state.plugins = std::make_shared<Plugins>(state.availablePlugins, enabled, logger, action, state.pluginSignaturePolicy);
+    } catch (...) {
+        closeDisabledPanels({});
+        refreshPoolModels(state);
+        throw;
+    }
     state.enabledPlugins = enabled;
     updateProviderControls(state);
     updatePluginEntries(state);
@@ -1077,15 +1136,37 @@ static void applyPlugins(State& state, const std::vector<std::string>& enabled) 
     }
     updateSourceControls(state);
     refreshPoolModels(state);
+    if (!state.demo && state.pluginEnabled(dshPlugin)) {
+        try {
+            if (!state.dshUsage) state.dshUsage = std::make_shared<DshUsage>(settingsPath().parent_path() / L"dsh-usage.json");
+            state.dsh = std::make_unique<DshBridge>(state.window);
+            state.logLine(L"DeepSeek Harness 本机桥接已启动");
+        } catch (const std::exception& error) { state.logLine(wide(error.what())); }
+    }
 }
-enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, PluginFolder, PluginApply };
+enum PluginId { PluginList = 2000, PluginCommands, PluginRun, PluginRescan, PluginFolder, PluginApply, PluginSignature };
 struct PluginDialog {
     State* state;
-    HWND list{}, commands{};
+    HWND list{}, commands{}, signature{};
     bool capture = false, apiTest = false;
     std::string failure;
     std::optional<Job> refinement;
 };
+static WPARAM pluginSignatureCheckState(PluginSignaturePolicy policy) {
+    switch (policy) {
+    case PluginSignaturePolicy::Disabled: return BST_UNCHECKED;
+    case PluginSignaturePolicy::Trusted: return BST_INDETERMINATE;
+    case PluginSignaturePolicy::SameSigner: return BST_CHECKED;
+    }
+    return BST_CHECKED;
+}
+static PluginSignaturePolicy selectedPluginSignaturePolicy(HWND checkbox) {
+    switch (SendMessageW(checkbox, BM_GETCHECK, 0, 0)) {
+    case BST_UNCHECKED: return PluginSignaturePolicy::Disabled;
+    case BST_INDETERMINATE: return PluginSignaturePolicy::Trusted;
+    default: return PluginSignaturePolicy::SameSigner;
+    }
+}
 static void fillPluginCommands(PluginDialog& dialog) {
     SendMessageW(dialog.commands, CB_RESETCONTENT, 0, 0);
     int selected = ListView_GetNextItem(dialog.list, -1, LVNI_SELECTED);
@@ -1119,6 +1200,27 @@ static void fillPluginList(PluginDialog& dialog, const std::vector<std::string>&
     }
     fillPluginCommands(dialog);
 }
+static void applyPluginSelection(PluginDialog& dialog) {
+    auto& state = *dialog.state;
+    auto enabled = selectedPlugins(dialog);
+    auto policy = selectedPluginSignaturePolicy(dialog.signature);
+    bool policyChanged = policy != state.pluginSignaturePolicy;
+    if (policyChanged || enabled != state.enabledPlugins) {
+        state.pluginSignaturePolicy = policy;
+        try {
+            applyPlugins(state, enabled);
+        } catch (...) {
+            for (int i = 0; i < ListView_GetItemCount(dialog.list); ++i)
+                ListView_SetCheckState(dialog.list, i, FALSE);
+            if (policyChanged) {
+                try { saveSettings(state); }
+                catch (const std::exception& error) { state.logLine(L"无法保存插件签名验证设置：" + wide(error.what())); }
+            }
+            throw;
+        }
+    }
+    saveSettings(state);
+}
 static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* dialog = reinterpret_cast<PluginDialog*>(GetWindowLongPtrW(window, DWLP_USER));
     try {
@@ -1150,6 +1252,20 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             add(L"BUTTON", L"执行命令", WS_TABSTOP | BS_PUSHBUTTON, PluginRun, 554, 284, 162, 30);
             add(L"BUTTON", L"打开目录", WS_TABSTOP | BS_PUSHBUTTON, PluginFolder, 16, 342, 100, 32);
             add(L"BUTTON", L"重新扫描", WS_TABSTOP | BS_PUSHBUTTON, PluginRescan, 128, 342, 100, 32);
+            dialog->signature = add(L"BUTTON", L"插件签名验证", WS_TABSTOP | BS_AUTO3STATE,
+                PluginSignature, 244, 342, 244, 32);
+            SendMessageW(dialog->signature, BM_SETCHECK, pluginSignatureCheckState(state.pluginSignaturePolicy), 0);
+            HWND tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, state.instance, nullptr);
+            if (tip) {
+                TOOLINFOW info{sizeof(info)};
+                info.uFlags = TTF_IDISHWND | TTF_SUBCLASS; info.hwnd = window;
+                info.uId = reinterpret_cast<UINT_PTR>(dialog->signature);
+                info.lpszText = const_cast<LPWSTR>(L"勾选：签名有效且签名者证书与主程序一致。\r\n"
+                    L"横杠：只要求插件签名有效。\r\n未勾选：不验证插件签名。");
+                SendMessageW(tip, TTM_SETMAXTIPWIDTH, 0, 360);
+                SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
+            }
             add(L"BUTTON", L"应用", WS_TABSTOP | BS_PUSHBUTTON, PluginApply, 504, 342, 100, 32);
             add(L"BUTTON", L"关闭", WS_TABSTOP | BS_DEFPUSHBUTTON, IDCANCEL, 616, 342, 100, 32);
             fillPluginList(*dialog, state.enabledPlugins);
@@ -1167,6 +1283,24 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             int index = int(found - state.availablePlugins.begin());
             ListView_SetItemState(dialog->list, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             ListView_SetCheckState(dialog->list, index, TRUE);
+            for (auto [policy, errorPrefix] : {
+                std::pair{PluginSignaturePolicy::SameSigner, "主程序"},
+                {PluginSignaturePolicy::Trusted, "插件 memestudio.example"}}) {
+                SendMessageW(dialog->signature, BM_CLICK, 0, 0);
+                if (selectedPluginSignaturePolicy(dialog->signature) != policy ||
+                    SendMessageW(dialog->signature, BM_GETCHECK, 0, 0) != LRESULT(pluginSignatureCheckState(policy)))
+                    throw Error("Plugin signature checkbox did not cycle");
+                bool rejected = false;
+                try { applyPluginSelection(*dialog); }
+                catch (const Error& error) { rejected = std::string_view(error.what()).starts_with(errorPrefix); }
+                if (!rejected || state.pluginSignaturePolicy != policy || state.plugins ||
+                    !state.enabledPlugins.empty() || ListView_GetCheckState(dialog->list, index))
+                    throw Error("Plugin signature policy did not reject the unsigned build");
+                ListView_SetCheckState(dialog->list, index, TRUE);
+            }
+            SendMessageW(dialog->signature, BM_CLICK, 0, 0);
+            if (selectedPluginSignaturePolicy(dialog->signature) != PluginSignaturePolicy::Disabled)
+                throw Error("Plugin signature checkbox did not return to unchecked");
             SendMessageW(window, WM_COMMAND, PluginRun, 0);
             if (!dialog->failure.empty()) return TRUE;
             if (state.text(state.instruction).find(L"Maintain consistent character identity") == std::wstring::npos)
@@ -1192,8 +1326,7 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
         }
         case PluginApply:
             if (state.busy) throw Error("请等待主界面任务结束后再应用插件设置");
-            if (auto ids = selectedPlugins(*dialog); ids != state.enabledPlugins) applyPlugins(state, ids);
-            saveSettings(state);
+            applyPluginSelection(*dialog);
             state.logLine(L"插件设置已应用"); return TRUE;
         case PluginRun: {
             if (state.busy) throw Error("请等待主界面任务结束后再执行插件命令");
@@ -1201,13 +1334,23 @@ static INT_PTR CALLBACK pluginProcedure(HWND window, UINT message, WPARAM wparam
             int commandIndex = int(SendMessageW(dialog->commands, CB_GETCURSEL, 0, 0));
             if (selected < 0 || commandIndex < 0) throw Error("请选择插件和命令");
             auto info = state.availablePlugins[selected];
-            auto selectedIds = selectedPlugins(*dialog);
-            if (selectedIds != state.enabledPlugins) applyPlugins(state, selectedIds);
-            saveSettings(state);
+            applyPluginSelection(*dialog);
+            if (!state.pluginEnabled(info.id)) throw Error("请先启用插件并应用设置");
             Json context{{"source", utf8(state.source.wstring())}, {"character", utf8(state.character.wstring())},
                 {"result", utf8(state.resultPath.wstring())},
                 {"output", utf8(state.text(state.output))}, {"instruction", utf8(state.text(state.instruction))}};
             auto result = state.plugins->command(info.id, info.commands.at(commandIndex).id, context, window);
+            if (info.id == dshPlugin && result.value("action", "") == "dsh_permissions") {
+                configureDsh(state);
+                return TRUE;
+            }
+            if (info.id == dshPlugin && result.value("action", "") == "dsh_cancel") {
+                if (state.dshActive()) {
+                    state.dsh->stopJob();
+                    state.logLine(L"正在取消 DeepSeek Harness 任务");
+                }
+                return TRUE;
+            }
             if (result.value("action", "") == "prompt_draw") {
                 if (std::find(state.enabledPlugins.begin(), state.enabledPlugins.end(), "memestudio.prompt-draw") ==
                     state.enabledPlugins.end()) throw Error("请先启用无图绘制插件");
@@ -1300,6 +1443,7 @@ static void selectResult(State& state, size_t index) {
 }
 static void fetchModels(State& state) {
     if (state.busy) return;
+    if (state.dshActive()) throw Error("DeepSeek Harness 正在运行任务");
     if (state.gatewayEnabled()) {
         refreshPoolModels(state);
         state.logLine(L"已汇总供应商池的启用模型；可在 API 均衡灾备中获取并勾选各 API 模型");
@@ -1328,8 +1472,45 @@ static void fetchModels(State& state) {
             completion.release();
     });
 }
+static Provider currentProvider(State& state, bool imageParameters) {
+    Provider provider;
+    provider.baseUrl = state.text(state.get(BaseUrl)); provider.key = state.text(state.get(Key));
+    provider.model = selectedModel(state); provider.timeoutSeconds = state.number(Timeout, 5, 3600);
+    if (!imageParameters) return provider;
+    provider.quality = utf8(state.text(state.get(Quality)));
+    provider.size = utf8(state.text(state.get(Size))); provider.imageField = utf8(state.text(state.get(ImageField)));
+    provider.complexity = utf8(state.text(state.get(Complexity)));
+    provider.outputFormat = utf8(state.text(state.get(OutputFormat)));
+    for (auto* field : {&provider.quality, &provider.size, &provider.complexity, &provider.outputFormat})
+        if (*field == utf8(L"不发送")) field->clear();
+    if ((provider.outputFormat == "jpeg" || provider.outputFormat == "webp") &&
+        state.text(state.get(Compression)) != L"不发送") provider.compression = state.number(Compression, 0, 100);
+    provider.stream = state.checked(Streaming);
+    if (provider.stream) provider.partialImages = state.number(PartialImages, 1, 3);
+    try { provider.extra = Json::parse(utf8(state.text(state.get(Extra)))); }
+    catch (...) { throw Error("扩展参数不是有效 JSON"); }
+    if (!provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
+    return provider;
+}
+static DshSettings dshSettings(State& state, bool generation) {
+    DshSettings value;
+    value.enabled = state.enabledPlugins;
+    value.policy = state.dshPolicy;
+    value.usage = state.dshUsage;
+    value.routing = state.routing;
+    value.routing.enabled = state.gatewayEnabled();
+    value.job.provider = currentProvider(state, generation);
+    if (generation) {
+        value.job.plugins = state.plugins;
+        value.job.stride = state.number(Stride, 1, 600); value.job.maxFrames = state.number(MaxFrames, 0, 600);
+        value.job.consistency = state.checked(Consistency); value.job.preserveText = state.checked(PreserveText);
+        if (state.pluginEnabled("memestudio.waifu2x")) value.job.upscale = state.upscale;
+    }
+    return value;
+}
 static void start(State& state, const Job* refinement) {
     if (state.busy) return;
+    if (state.dshActive()) throw Error("DeepSeek Harness 正在运行任务");
     if (!refinement && (state.source.empty() || state.character.empty()))
         throw Error("请先导入表情素材和人物参考图");
     Job job;
@@ -1350,28 +1531,11 @@ static void start(State& state, const Job* refinement) {
         job.styles = refinement->styles; job.instruction = refinement->instruction;
         job.output = refinement->output; job.stride = 1; job.maxFrames = 0;
     }
-    job.provider.baseUrl = state.text(state.get(BaseUrl)); job.provider.key = state.text(state.get(Key));
-    job.provider.model = selectedModel(state); job.provider.quality = utf8(state.text(state.get(Quality)));
+    job.provider = currentProvider(state, true);
     auto modelBegin = job.provider.model.find_first_not_of(" \t\r\n");
     auto modelEnd = job.provider.model.find_last_not_of(" \t\r\n");
     if (modelBegin == std::string::npos) throw Error("请先选择或填写模型名称");
     job.provider.model = job.provider.model.substr(modelBegin, modelEnd - modelBegin + 1);
-    job.provider.size = utf8(state.text(state.get(Size))); job.provider.imageField = utf8(state.text(state.get(ImageField)));
-    job.provider.complexity = utf8(state.text(state.get(Complexity)));
-    job.provider.outputFormat = utf8(state.text(state.get(OutputFormat)));
-    if (job.provider.complexity == utf8(L"不发送")) job.provider.complexity.clear();
-    if (job.provider.outputFormat == utf8(L"不发送")) job.provider.outputFormat.clear();
-    if ((job.provider.outputFormat == "jpeg" || job.provider.outputFormat == "webp") &&
-        state.text(state.get(Compression)) != L"不发送")
-        job.provider.compression = state.number(Compression, 0, 100);
-    job.provider.stream = state.checked(Streaming);
-    if (job.provider.stream) job.provider.partialImages = state.number(PartialImages, 1, 3);
-    if (job.provider.quality == utf8(L"不发送")) job.provider.quality.clear();
-    if (job.provider.size == utf8(L"不发送")) job.provider.size.clear();
-    job.provider.timeoutSeconds = state.number(Timeout, 5, 3600);
-    try { job.provider.extra = Json::parse(utf8(state.text(state.get(Extra)))); }
-    catch (...) { throw Error("扩展参数不是有效 JSON"); }
-    if (!job.provider.extra.is_object()) throw Error("扩展参数必须是 JSON 对象");
     if (state.gatewayEnabled()) {
         auto logger = [window = state.window](const std::wstring& message) {
             auto event = std::make_unique<Progress>(); event->message = message;
@@ -1574,7 +1738,7 @@ static void initialize(State& state) {
     };
     auto title = label(L"表情重绘", 16, 13, 160, 34);
     SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(state.titleFont), TRUE);
-    auto brand = label(L"MEME STUDIO", 184, 23, 160);
+    auto brand = label(L"MEME STUDIO", 184, 23, 128);
     SendMessageW(brand, WM_SETFONT, reinterpret_cast<WPARAM>(state.smallFont), TRUE);
     label(L"原始表情", 16, 72, 96); button(Source, L"导入…", 176, 66, 82);
     state.sourcePath = control(state, state.window, L"STATIC", L"未选择文件", SS_PATHELLIPSIS, 0, 16, 103, 242, 22);
@@ -1609,11 +1773,12 @@ static void initialize(State& state) {
         WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
         Instruction, 16, 686, 242, 100, true);
     button(SourceTab, L"原图", 0, 0, 82, false); button(ResultTab, L"结果", 0, 0, 82, false);
-    button(RefineEntry, L"局部重绘…", 380, 15, 120);
-    button(DrawingEntry, L"无图绘制…", 510, 15, 120);
-    button(ApiTestEntry, L"API 参数测试…", 640, 15, 120);
-    button(RoutingEntry, L"API 均衡灾备…", 770, 15, 120);
-    button(QwenEntry, L"Qwen-Image…", 900, 15, 120);
+    button(RefineEntry, L"局部重绘…", 0, 0, pluginButtonWidth);
+    button(DrawingEntry, L"无图绘制…", 0, 0, pluginButtonWidth);
+    button(ApiTestEntry, L"API 参数测试…", 0, 0, pluginButtonWidth);
+    button(RoutingEntry, L"API 均衡灾备…", 0, 0, pluginButtonWidth);
+    button(QwenEntry, L"Qwen-Image…", 0, 0, pluginButtonWidth);
+    button(DshEntry, L"Harness 权限…", 0, 0, pluginButtonWidth, false);
     state.resultChoice = control(state, state.window, L"COMBOBOX", L"",
         WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, ResultChoice, 0, 0, 100, 200, true);
     ShowWindow(state.resultChoice, SW_HIDE);
@@ -1671,6 +1836,7 @@ static void initialize(State& state) {
     tip(GetDlgItem(state.window, SourceNext), L"下一份源素材");
     tip(position, L"输入素材序号，按 Enter 或移开焦点跳转");
     tip(GetDlgItem(state.window, SourceFolder), L"导入文件夹当前层级的图片和 GIF");
+    tip(GetDlgItem(state.window, DshEntry), L"DeepSeek Harness 权限");
     tip(state.get(Stride), L"每隔多少源帧生成一帧；合并对应显示时长");
     tip(state.get(MaxFrames), L"自动抽帧，覆盖完整动画；0 表示不设上限");
     tip(state.get(ImageField), L"多张图片重复使用同一个上传字段");
@@ -1686,6 +1852,7 @@ static void initialize(State& state) {
     SetTimer(state.window, 1, 20, nullptr);
 }
 static void command(State& state, int id, int notification) {
+    if (id == DshEntry) { configureDsh(state); return; }
     if (id == QwenEntry && !state.busy) { configureQwen(state); return; }
     if (id == RoutingEntry && !state.busy) { configureRouting(state); return; }
     if (id == ApiTestEntry && !state.busy) { startApiParameterTest(state); return; }
@@ -1786,6 +1953,19 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
     if (!state) return DefWindowProcW(window, message, wparam, lparam);
     try {
         switch (message) {
+        case dshDispatch:
+            if (state->dsh) state->dsh->dispatch([&](const Json& request) {
+                if (state->busy || state->closing) throw Error("MemeConvertStudio is busy");
+                auto report = [window](const Progress& progress) {
+                    if (progress.message.empty() || progress.partial >= 0) return;
+                    auto event = std::make_unique<Progress>();
+                    event->done = progress.done; event->total = progress.total;
+                    event->message = L"DeepSeek Harness · " + progress.message;
+                    if (PostMessageW(window, WM_PROGRESS, 0, LPARAM(event.get()))) event.release();
+                };
+                return prepareDsh(request, [&](bool options) { return dshSettings(*state, options); }, report);
+            });
+            return 0;
         case WM_PLUGIN_ACTION: {
             std::unique_ptr<Json> action(reinterpret_cast<Json*>(lparam));
             if (!state->closing && state->pluginEnabled("memestudio.qwen-image") &&
@@ -1909,12 +2089,15 @@ static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam, LPAR
             if (state->busy) { state->closing = true; state->cancel.stop(); return 0; }
             DestroyWindow(window); return 0;
         case WM_DESTROY:
+            state->dsh.reset();
             destroyPanels();
             state->plugins.reset();
             {
                 MSG pending{};
                 while (PeekMessageW(&pending, window, WM_PLUGIN_ACTION, WM_PLUGIN_ACTION, PM_REMOVE))
                     delete reinterpret_cast<Json*>(pending.lParam);
+                while (PeekMessageW(&pending, window, WM_PROGRESS, WM_PROGRESS, PM_REMOVE))
+                    delete reinterpret_cast<Progress*>(pending.lParam);
             }
             KillTimer(window, 1); PostQuitMessage(0); return 0;
         }
@@ -2107,7 +2290,8 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
             if (drawing) {
                 RECT bounds{}; GetWindowRect(GetDlgItem(window, DrawingEntry), &bounds);
                 MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&bounds), 2);
-                if (bounds.left != (redraw ? 510 : 380)) throw Error("Plugin toolbar left an empty slot");
+                if (bounds.left != pluginBarLeft + (redraw ? pluginButtonWidth + pluginButtonGap : 0))
+                    throw Error("Plugin toolbar left an empty slot");
             }
         };
         checkPluginVisibility(false, false, false);
@@ -2132,6 +2316,21 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         applyPlugins(state, {});
         if (visible(QwenEntry)) throw Error("Qwen entry visible after unloading");
         report["qwen_plugin_visibility"] = "passed";
+        if (visible(DshEntry) || state.get(DshEntry)) throw Error("Unexpected Harness permissions entry");
+        applyPlugins(state, {dshPlugin});
+        auto dshEntry = GetDlgItem(window, DshEntry);
+        if (!visible(DshEntry) || !IsWindowEnabled(dshEntry) || clientBounds(dshEntry, window).left != pluginBarLeft ||
+            state.plugins->command(dshPlugin, "permissions", Json::object(), window)
+                .value("action", "") != "dsh_permissions") throw Error("Harness permissions entry failed");
+        SendMessageW(dshEntry, BM_CLICK, 0, 0);
+        auto dshPanel = findPanel("dsh-permissions");
+        if (!dshPanel || !IsWindowEnabled(window)) throw Error("Harness permissions panel is not modeless");
+        RECT dshBounds{}; GetWindowRect(dshPanel, &dshBounds);
+        snapshot(dshBounds.right - dshBounds.left, dshBounds.bottom - dshBounds.top, L"ui-dsh-permissions.png", dshPanel);
+        SendMessageW(dshPanel, WM_COMMAND, IDOK, 0);
+        applyPlugins(state, {});
+        if (visible(DshEntry) || findPanel("dsh-permissions")) throw Error("Harness permission UI survived plugin unload");
+        report["dsh_permission_panel"] = "passed";
         auto savedInstruction = state.text(state.instruction);
         applyPlugins(state, {"memestudio.example"});
         if (state.plugins->fingerprint().size() != 1 ||
@@ -2143,6 +2342,7 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         applyPlugins(state, {});
         state.set(state.instruction, savedInstruction);
         report["plugin_hooks"] = "passed";
+        report["plugin_signature_policy"] = "passed";
         applyPlugins(state, {"memestudio.local-redraw"});
         checkPluginVisibility(true, false, false);
         auto refineAction = state.plugins->command("memestudio.local-redraw", "refine-result",
@@ -2178,9 +2378,18 @@ int runGui(HINSTANCE instance, const fs::path& demo, bool capture) {
         report["drawing_plugin"] = "passed";
         checkPluginVisibility(false, false, false);
         applyPlugins(state, {"memestudio.local-redraw", "memestudio.prompt-draw", "memestudio.batch-convert",
-            "memestudio.api-parameter-test", "memestudio.api-load-balancing", "memestudio.qwen-image"});
+            "memestudio.api-parameter-test", "memestudio.api-load-balancing", "memestudio.qwen-image", dshPlugin});
         checkPluginVisibility(true, true, true);
         snapshot(1120, 830, L"ui-plugins-enabled.png");
+        RECT compactClient{}; GetClientRect(window, &compactClient);
+        int previousRight = pluginBarLeft - pluginButtonGap;
+        for (int id : {RefineEntry, DrawingEntry, ApiTestEntry, RoutingEntry, QwenEntry, DshEntry}) {
+            auto bounds = clientBounds(GetDlgItem(window, id), window);
+            if (!visible(id) || bounds.top != 15 || bounds.left != previousRight + pluginButtonGap ||
+                bounds.right > compactClient.right - 8)
+                throw Error("Plugin toolbar does not fit at the minimum window width");
+            previousRight = bounds.right;
+        }
         state.busy = true;
         updatePluginEntries(state); updateSourceControls(state);
         checkPluginVisibility(true, true, true);

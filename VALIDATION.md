@@ -1,5 +1,22 @@
 # 验证记录
 
+## 命令行
+
+`node tests/cli.mjs bin/cli/MemeStudio-cli.exe` 使用回环模拟供应商验证参数生成、Unicode
+路径、JSON / JSONC / INI 的读取与覆盖、插件加载与调用、批量和重绘，以及参数探测仅在
+显式开启时发送请求；配置文件不会被改写。旧 `--job` 的供应商路由由 `tests/routing.mjs` 验证。
+
+## DeepSeek Harness 增量
+
+2026-11-18：使用 DeepSeek Harness 本机运行时 `0.2.2-rc.1` 校验八项工具的声明。
+`node tests/dsh.mjs --exe=bin/dsh-policy/MemeStudio.exe` 使用本机模拟接口验证 Windows 命名管道、
+默认拒绝、模型白名单、插件设置覆盖、GIF 和批量限额、实际参数探测、重启后用量保留、
+灾备扣减、取消及输入文件保护。
+`node tests/batch.mjs --ui-only --exe=bin/dsh-policy/MemeStudio.exe` 验证权限面板仅在加载插件后显示、
+打开时主窗口仍可操作、卸载后自动关闭，以及现有界面流程。
+Windows x64 和 ARM64 编译通过；运行验证在 x64 完成。
+未修改现有 Harness 配置，也未调用真实付费接口。
+
 本文件记录当前主分支的可复现验证范围。它不是对所有供应商、模型、硬件或
 生成质量的保证，也不替代第三方项目自己的测试和许可证要求。
 
@@ -24,8 +41,8 @@
 ## 定向命令
 
 ```powershell
-node tests\batch.mjs --ui-only --exe=D:\Projects\MemeStudio\bin\panels\MemeStudio.exe
-node tests\routing.mjs --exe=D:\Projects\MemeStudio\bin\panels\MemeStudio.exe
+node tests\batch.mjs --ui-only --exe=bin\panels\MemeStudio.exe
+node tests\routing.mjs --exe=bin\panels\MemeStudio.exe
 ```
 
 以下检查仅在需要验证对应插件时运行：

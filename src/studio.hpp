@@ -73,12 +73,14 @@ struct Provider {
     int timeoutSeconds = 600;
     std::shared_ptr<ApiRouter> router;
     std::shared_ptr<AggregatedGateway> gateway;
+    std::function<void()> beforeImageSend;
 };
 struct ApiHttpError : Error {
     DWORD status;
     ApiHttpError(DWORD code, const std::string& message) : Error(message), status(code) {}
 };
 struct ApiConnectionError : Error { using Error::Error; };
+struct ApiRequestBlocked : Error { using Error::Error; };
 struct Cancel {
     std::atomic_bool stopped{false};
     std::mutex mutex;

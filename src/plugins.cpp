@@ -1,19 +1,96 @@
 #include "plugins.hpp"
+#include <wintrust.h>
+#include <softpub.h>
 #include <algorithm>
 #include <cctype>
 #include <set>
 #include <cstring>
 
 namespace studio {
+namespace {
+struct SignatureFile {
+    fs::path path;
+    HANDLE handle;
+    explicit SignatureFile(const fs::path& file) : path(fs::canonical(file)),
+        handle(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr)) {
+        if (handle == INVALID_HANDLE_VALUE) {
+            auto error = GetLastError();
+            throw Error("无法打开文件进行签名验证：" + utf8(path.wstring()) +
+                "，Windows 错误 " + std::to_string(error));
+        }
+    }
+    ~SignatureFile() { CloseHandle(handle); }
+    SignatureFile(const SignatureFile&) = delete;
+    SignatureFile& operator=(const SignatureFile&) = delete;
+};
+
+struct TrustCheck {
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_DATA data{};
+    ~TrustCheck() {
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+    }
+};
+
+std::vector<Bytes> trustedSigners(const SignatureFile& file, const std::string& label) {
+    WINTRUST_FILE_INFO info{};
+    info.cbStruct = sizeof(info);
+    info.pcwszFilePath = file.path.c_str();
+    info.hFile = file.handle;
+    std::vector<Bytes> signers;
+    DWORD secondaryCount = 0;
+    LONG firstStatus = TRUST_E_NOSIGNATURE;
+    for (DWORD index = 0; index <= secondaryCount; ++index) {
+        WINTRUST_SIGNATURE_SETTINGS signature{};
+        signature.cbStruct = sizeof(signature);
+        signature.dwIndex = index;
+        signature.dwFlags = WSS_VERIFY_SPECIFIC | (index == 0 ? WSS_GET_SECONDARY_SIG_COUNT : 0);
+        TrustCheck check;
+        auto& data = check.data;
+        data.cbStruct = sizeof(data);
+        data.dwUIChoice = WTD_UI_NONE;
+        data.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
+        data.dwProvFlags = WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT | WTD_DISABLE_MD2_MD4;
+        data.dwUnionChoice = WTD_CHOICE_FILE;
+        data.pFile = &info;
+        data.dwStateAction = WTD_STATEACTION_VERIFY;
+        auto status = WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &check.action, &data);
+        if (index == 0) {
+            firstStatus = status;
+            secondaryCount = signature.cSecondarySigs;
+        }
+        if (status != ERROR_SUCCESS) continue;
+        auto provider = WTHelperProvDataFromStateData(data.hWVTStateData);
+        auto signer = provider ? WTHelperGetProvSignerFromChain(provider, 0, FALSE, 0) : nullptr;
+        // Use the verified publisher's leaf certificate, not its display name or timestamp signer.
+        if (signer && signer->csCertChain && signer->pasCertChain && signer->pasCertChain[0].pCert) {
+            auto cert = signer->pasCertChain[0].pCert;
+            signers.emplace_back(cert->pbCertEncoded, cert->pbCertEncoded + cert->cbCertEncoded);
+        }
+    }
+    if (signers.empty()) {
+        if (firstStatus == TRUST_E_NOSIGNATURE) throw Error(label + "没有有效的数字签名");
+        throw Error(label + "签名验证失败（Windows 状态 " + std::to_string(firstStatus) + "）");
+    }
+    return signers;
+}
+
+fs::path executablePath() {
+    wchar_t path[32768]{};
+    DWORD size = GetModuleFileNameW(nullptr, path, 32768);
+    if (!size || size == 32768) throw Error("无法定位主程序");
+    return fs::path(path);
+}
+}
+
 static bool identifier(const std::string& value) {
     return !value.empty() && value.size() <= 80 && std::all_of(value.begin(), value.end(),
         [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == '.'; });
 }
 fs::path pluginDirectory() {
-    wchar_t path[32768]{};
-    DWORD size = GetModuleFileNameW(nullptr, path, 32768);
-    if (!size || size == 32768) throw Error("无法定位插件目录");
-    return fs::path(path).parent_path() / L"plugins";
+    return executablePath().parent_path() / L"plugins";
 }
 std::vector<PluginInfo> discoverPlugins(const fs::path& directory) {
     std::vector<PluginInfo> result;
@@ -60,7 +137,8 @@ struct Plugins::Module {
 };
 Plugins::Plugins(const std::vector<PluginInfo>& available, const std::vector<std::string>& enabled,
     std::function<void(const std::wstring&)> log,
-    std::function<void(const std::string&, const Json&)> onAction) : logger(std::move(log)), action(std::move(onAction)) {
+    std::function<void(const std::string&, const Json&)> onAction,
+    PluginSignaturePolicy signaturePolicy) : logger(std::move(log)), action(std::move(onAction)) {
     host = {sizeof(host), MEMESTUDIO_PLUGIN_ABI, this,
         [](void* context, const char* message) {
             try {
@@ -78,14 +156,41 @@ Plugins::Plugins(const std::vector<PluginInfo>& available, const std::vector<std
                 if (result.is_object()) self.action(std::string(plugin, strnlen_s(plugin, 128)), result);
             } catch (...) {}
         }};
-    std::set<std::string> loaded;
-    try { for (const auto& id : enabled) {
-        if (!loaded.insert(id).second) continue;
+    if (enabled.empty()) return;
+    const bool verify = signaturePolicy != PluginSignaturePolicy::Disabled;
+    const bool sameSigner = signaturePolicy == PluginSignaturePolicy::SameSigner;
+    std::vector<Bytes> hostSigners;
+    if (sameSigner) hostSigners = trustedSigners(SignatureFile(executablePath()), "主程序");
+    struct Candidate {
+        const PluginInfo& info;
+        std::unique_ptr<SignatureFile> file;
+    };
+    std::vector<Candidate> candidates;
+    std::set<std::string> seen;
+    for (const auto& id : enabled) {
+        if (!seen.insert(id).second) continue;
         auto found = std::find_if(available.begin(), available.end(), [&](const auto& info) { return info.id == id; });
         if (found == available.end() || !found->error.empty()) throw Error("插件不可用：" + id);
-        auto module = std::make_unique<Module>(); module->info = *found;
-        module->hash = digest(readFile(module->info.library));
-        module->handle = LoadLibraryExW(fs::absolute(found->library).c_str(), nullptr,
+        Candidate candidate{*found, nullptr};
+        if (verify) {
+            candidate.file = std::make_unique<SignatureFile>(found->library);
+            auto signers = trustedSigners(*candidate.file, "插件 " + id + "：");
+            if (sameSigner && std::none_of(signers.begin(), signers.end(), [&](const auto& signer) {
+                return std::find(hostSigners.begin(), hostSigners.end(), signer) != hostSigners.end();
+            })) throw Error("插件 " + id + " 的签名者证书与主程序不一致");
+        }
+        candidates.push_back(std::move(candidate));
+    }
+    // Check every requested DLL before executing any plugin code, and retain the read handles through loading.
+    try { for (const auto& candidate : candidates) {
+        const auto& info = candidate.info;
+        const auto& id = info.id;
+        auto path = candidate.file ? candidate.file->path : fs::absolute(info.library);
+        if (verify && GetModuleHandleW(path.c_str()))
+            throw Error("插件 " + id + " 的 DLL 已在进程中加载，请重启主程序后再试");
+        auto module = std::make_unique<Module>(); module->info = info;
+        module->hash = digest(readFile(path));
+        module->handle = LoadLibraryExW(path.c_str(), nullptr,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if (!module->handle) throw Error("无法加载插件 " + id + "，Windows 错误 " + std::to_string(GetLastError()));
         auto entry = reinterpret_cast<MemeStudioPluginEntryV1>(GetProcAddress(module->handle, MEMESTUDIO_PLUGIN_ENTRY));

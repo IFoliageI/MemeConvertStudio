@@ -73,6 +73,7 @@ Waifu2x 插件有各自的外部运行时要求，见对应说明。
 | API 参数支持测试 | 探测单项和组合参数，并估算 Token | [`plugin-api-parameter-test`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-parameter-test) |
 | API 负载均衡与灾备 | 聚合网关、供应商池、权重、灾备和效果对比 | [`plugin-api-load-balancing`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-api-load-balancing) |
 | 本地模型支持 - Qwen-Image | GGUF / Vulkan、Diffusers 和 OpenAI 兼容本地端点 | [`plugin-qwen-image`](https://github.com/IFoliageI/MemeConvertStudio/tree/plugin-qwen-image) |
+| DeepSeek Harness 调用兼容 | 通过 Cordis 插件调用当前应用；由权限面板控制插件、模型与生成额度 | [安装与权限](plugins/deepseek-harness/README.md) |
 
 独立插件分支只包含对应插件、最小 ABI、构建脚本、说明和自动构建配置。
 需要宿主服务的插件仍必须运行包含相应宿主实现的主程序。
@@ -155,32 +156,15 @@ node .\tests\routing.mjs
 
 ### 命令行任务
 
-设置 `OPENAI_API_KEY` 后传入 JSON：
+`MemeStudio-cli.exe` 支持直接传参，也能从 JSON、JSONC 或 INI 读取任务。密钥从环境变量读取，运行不会保存 GUI 设置：
 
 ```powershell
-$env:OPENAI_API_KEY = "your-key"
-Start-Process .\bin\MemeStudio.exe -ArgumentList @("--job", "D:\path\job.json") -Wait
+.\bin\MemeStudio-cli.exe replace --source meme.gif --character character.png --output edited.gif
+.\bin\MemeStudio-cli.exe run --config .\job.jsonc --model image-model
+.\bin\MemeStudio-cli.exe plugins
 ```
 
-最小任务示例：
-
-```json
-{
-  "source": "D:/images/meme.gif",
-  "character": "D:/images/character.png",
-  "styles": ["D:/images/style.png"],
-  "output": "D:/images/meme-edited.gif",
-  "base_url": "https://your-provider.example/v1",
-  "model": "your-image-model",
-  "api_key_env": "OPENAI_API_KEY",
-  "quality": "auto",
-  "size": "auto",
-  "count": 1,
-  "resume": true
-}
-```
-
-完整字段和插件配置见 [PLUGINS.md](PLUGINS.md)。
+参见 [命令行手册](CLI.md)。旧版 `MemeStudio.exe --job job.json` 仍可使用。
 
 ## 安全、隐私与限制
 

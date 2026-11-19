@@ -153,7 +153,8 @@ Multipart multipart(const Provider& provider, const std::string& text, const std
 struct Response { DWORD status; Bytes data; bool streamed = false; };
 static Response request(const std::wstring& url, const wchar_t* method, const std::wstring& headers,
     const Bytes& body, int timeout, Cancel& cancel,
-    const std::function<void(const char*, size_t)>& onChunk = {}) {
+    const std::function<void(const char*, size_t)>& onChunk = {},
+    const std::function<void()>& beforeSend = {}) {
     cancel.verify();
     URL_COMPONENTS parts{sizeof(URL_COMPONENTS)};
     parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
@@ -190,6 +191,9 @@ static Response request(const std::wstring& url, const wchar_t* method, const st
             throw Error("请求超时。任务已保留；供应商可能已计费，请确认后再续作。");
         throw Error("网络请求失败，Windows 错误 " + std::to_string(error));
     };
+    cancel.verify();
+    if (beforeSend) beforeSend();
+    cancel.verify();
     if (!WinHttpSendRequest(handle, headers.c_str(), static_cast<DWORD>(headers.size()),
         body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<BYTE*>(body.data()),
         static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0)) fail(true);
@@ -355,7 +359,7 @@ ApiProbeResult probeImage(const Provider& provider, const std::string& text,
             if (streamFailed) return;
             try { stream.feed(bytes, size); }
             catch (const std::exception& error) { streamFailed = true; streamError = error.what(); }
-        });
+        }, provider.beforeImageSend);
     result.status = response.status; result.streamed = response.streamed;
     try {
         if (response.streamed) {
@@ -427,7 +431,7 @@ static Image imageRequest(const Provider& provider, const std::wstring& url, con
             (provider.stream ? L"\r\nAccept: text/event-stream" : L""),
         body.data, provider.timeoutSeconds, cancel, provider.stream ?
             std::function<void(const char*, size_t)>([&](const char* bytes, size_t size) { stream.feed(bytes, size); }) :
-            std::function<void(const char*, size_t)>{});
+            std::function<void(const char*, size_t)>{}, provider.beforeImageSend);
     if (response.status < 200 || response.status >= 300) {
         try { jsonResponse(response, provider); }
         catch (const std::exception& error) { throw ApiHttpError(response.status, error.what()); }

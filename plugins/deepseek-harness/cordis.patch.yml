@@ -1,0 +1,4 @@
+- insert:
+    - id: memestudio-deepseek-harness
+      name: '@memestudio/deepseek-harness'
+      config: {}

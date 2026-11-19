@@ -12,6 +12,7 @@ struct PluginInfo {
 };
 fs::path pluginDirectory();
 std::vector<PluginInfo> discoverPlugins(const fs::path& directory);
+enum class PluginSignaturePolicy { Disabled, Trusted, SameSigner };
 class Plugins {
     struct Module;
     std::vector<std::unique_ptr<Module>> modules;
@@ -21,7 +22,8 @@ class Plugins {
 public:
     Plugins(const std::vector<PluginInfo>& available, const std::vector<std::string>& enabled,
         std::function<void(const std::wstring&)> log = {},
-        std::function<void(const std::string&, const Json&)> onAction = {});
+        std::function<void(const std::string&, const Json&)> onAction = {},
+        PluginSignaturePolicy signaturePolicy = PluginSignaturePolicy::Disabled);
     ~Plugins();
     Plugins(const Plugins&) = delete;
     Plugins& operator=(const Plugins&) = delete;

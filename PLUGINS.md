@@ -26,6 +26,17 @@
 主界面的插件专属入口仅在对应 DLL 成功加载后显示。停用或应用失败会隐藏入口；
 批量转换的目录与素材翻页控件同样按加载状态显示。任务期间入口保持显示但不可操作。
 
+“插件签名验证”有三种状态，点击“应用”或“执行命令”时保存，并在 DLL 加载前检查：
+
+| 状态 | 加载要求 |
+| --- | --- |
+| 勾选 | 插件和主程序的 Authenticode 签名均须通过 Windows 信任验证，且至少有一张相同的签名者证书。 |
+| 横杠 | 插件至少有一个通过 Windows 信任验证的 Authenticode 签名，不要求与主程序同一证书。 |
+| 未勾选（默认） | 不检查插件签名，可加载未签名的插件。 |
+
+签名检查失败时，本次所选插件不会加载；新选定的验证策略仍会保存。验证使用文件内嵌的 Authenticode 签名，
+插件检查仅覆盖清单声明的 DLL，不覆盖依赖、脚本或其他资源。独立命令行程序不读取 GUI 的签名设置。
+
 ## 清单
 
 ```json
@@ -94,20 +105,28 @@ frame_count 为 1，variation_index 区分生成副本。
 
 `.\build.ps1` 同时构建程序与 `example`、`local-redraw`、`waifu2x`、
 `batch-convert`、`prompt-draw`、`api-parameter-test`、`api-load-balancing`、
-`qwen-image` 八个插件，分别放到 `bin/plugins/<插件目录>`。
-CMake 也会复制八个插件及其服务资源到程序旁。
+`qwen-image`、`deepseek-harness`，分别放到 `bin/plugins/<插件目录>`。
+CMake 也会复制各插件及其服务资源到程序旁。
 SDK 不依赖 OpenAI SDK 或第三方框架。
 
-命令行任务可设置 `"plugins":["memestudio.example"]`；
-可选 `"plugin_directory":"D:/my-plugins"` 指定其他插件目录。
-不填写 plugins 时不加载插件。CLI 遇到不可用插件会直接报错。
+命令行任务可设置 `"plugins":["memestudio.example"]`，或用 `--load memestudio.example`
+临时加载；可用 `plugin_directory` 指定其他插件目录。内置工作流自动加载所需插件，
+不可用时直接报错。使用 `plugins` 查看可用命令，`plugin ID COMMAND` 调用支持无界面运行的命令。
+详见 [命令行手册](CLI.md)。
 
 ## 内置插件
 
-主仓库目前包含八个插件：`example`、`local-redraw`、`waifu2x`、
-`batch-convert`、`prompt-draw`、`api-parameter-test`、
-`api-load-balancing` 和 `qwen-image`。每个插件的功能、外部依赖和独立分支
-见主 README 的插件表；本节只记录宿主接口和配置边界。
+各插件的功能、外部依赖和独立分支见主 README 的插件表；本节记录宿主接口和
+配置边界。
+
+### DeepSeek Harness 调用兼容
+
+插件 ID 为 `memestudio.deepseek-harness`。宿主在插件加载后启动本机命名管道，
+停用插件或退出时关闭桥接。`permissions` 打开非模态权限面板，`cancel` 请求取消正在执行的 Harness 任务。
+桥接在主程序端检查权限、模型白名单和持久化的请求额度。
+同一安装目录下的 `package.json` 和 `cordis.patch.yml` 由 DeepSeek Harness 导入。
+该插件需要包含桥接服务的新版宿主；工具清单及安装见
+[插件说明](plugins/deepseek-harness/README.md)。
 
 ### 本地 Qwen-Image
 

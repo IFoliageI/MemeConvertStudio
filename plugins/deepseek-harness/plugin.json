@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "memestudio.deepseek-harness",
+  "name": "DeepSeek Harness 调用兼容",
+  "version": "1.0.0",
+  "description": "允许当前 Windows 用户的 DeepSeek Harness 调用图像处理工具。",
+  "library": "deepseek-harness.dll",
+  "commands": [
+    {"id": "permissions", "title": "Harness 权限设置"},
+    {"id": "cancel", "title": "取消 Harness 任务"}
+  ]
+}

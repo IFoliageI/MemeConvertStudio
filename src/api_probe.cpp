@@ -69,6 +69,7 @@ static Provider baselineProvider(const Provider& current) {
     Provider base;
     base.baseUrl = current.baseUrl; base.key = current.key; base.model = current.model;
     base.timeoutSeconds = current.timeoutSeconds;
+    base.beforeImageSend = current.beforeImageSend;
     base.quality.clear(); base.size.clear();
     base.imageField = "image[]";
     return base;
@@ -185,6 +186,7 @@ Json runParameterProbe(const ProbeOptions& options, Cancel& cancel, const std::f
         auto item = options.cases[i];
         item.provider.baseUrl = options.provider.baseUrl; item.provider.key = options.provider.key;
         item.provider.model = options.provider.model; item.provider.timeoutSeconds = options.provider.timeoutSeconds;
+        item.provider.beforeImageSend = options.provider.beforeImageSend;
         selected.push_back(std::move(item));
     }
     const std::string prompt = "Create a simple blue square on a white background. Return one image without text.";
@@ -243,7 +245,8 @@ Json runParameterProbe(const ProbeOptions& options, Cancel& cancel, const std::f
                 if ((i == 0 && result.outcome != "accepted") || result.status == 401 ||
                     result.status == 402 || result.status == 403 || result.status == 404 ||
                     result.status == 429 || result.status >= 500) stop = true;
-            } catch (const std::exception& error) {
+            } catch (const ApiRequestBlocked&) { throw; }
+            catch (const std::exception& error) {
                 row["outcome"] = cancel.stopped ? "cancelled" : "inconclusive";
                 row["detail"] = error.what(); stop = true;
             }

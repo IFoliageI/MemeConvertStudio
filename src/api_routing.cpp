@@ -182,7 +182,8 @@ Image ApiRouter::invoke(const Provider& base, Cancel& cancel,
             state.milliseconds += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             state.error.clear();
             return image;
-        } catch (const std::exception& error) {
+        } catch (const ApiRequestBlocked&) { throw; }
+        catch (const std::exception& error) {
             cancel.verify();
             auto http = dynamic_cast<const ApiHttpError*>(&error);
             bool connection = dynamic_cast<const ApiConnectionError*>(&error) != nullptr;

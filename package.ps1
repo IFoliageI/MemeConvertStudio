@@ -16,16 +16,19 @@ if (!$Executable) {
     $Executable = Join-Path $binaryDirectory $executableName
 }
 if (!(Test-Path -LiteralPath $executable)) { throw "Run build.ps1 first." }
+$cliExecutable = Join-Path $binaryDirectory "MemeStudio-cli.exe"
+if (!(Test-Path -LiteralPath $cliExecutable)) { throw "Run build.ps1 to build the console executable first." }
 $package = Join-Path $project "dist\MemeStudio"
 New-Item -ItemType Directory -Force -Path $package,(Join-Path $package "bin") | Out-Null
 foreach ($name in @("src", "tests", "vendor", "sdk")) {
     Copy-Item -LiteralPath (Join-Path $project $name) -Destination $package -Recurse -Force
 }
-foreach ($name in @("README.md", "PLUGINS.md", "VALIDATION.md", "CMakeLists.txt", "build.ps1", "package.ps1", ".gitignore")) {
+foreach ($name in @("README.md", "CLI.md", "PLUGINS.md", "VALIDATION.md", "THIRD_PARTY.md", "CMakeLists.txt", "build.ps1", "package.ps1", ".gitignore")) {
     Copy-Item -LiteralPath (Join-Path $project $name) -Destination $package -Force
 }
 Copy-Item -LiteralPath $executable -Destination (Join-Path $package "bin\MemeStudio.exe") -Force
-foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert", "prompt-draw", "api-parameter-test", "api-load-balancing", "qwen-image")) {
+Copy-Item -LiteralPath $cliExecutable -Destination (Join-Path $package "bin\MemeStudio-cli.exe") -Force
+foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert", "prompt-draw", "api-parameter-test", "api-load-balancing", "qwen-image", "deepseek-harness")) {
     $sourceOutput = Join-Path $package "plugins\$pluginName"
     New-Item -ItemType Directory -Force -Path $sourceOutput | Out-Null
     foreach ($name in @("plugin.cpp", "plugin.json")) {
@@ -40,6 +43,12 @@ foreach ($pluginName in @("example", "local-redraw", "waifu2x", "batch-convert",
         foreach ($file in @("server.py", "environment.py", "model_info.py", "sdcpp_backend.py", "requirements.txt", "README.md")) {
             Copy-Item -LiteralPath (Join-Path $binaryDirectory "plugins\qwen-image\$file") -Destination $pluginOutput -Force
             Copy-Item -LiteralPath (Join-Path $project "plugins\qwen-image\$file") -Destination $sourceOutput -Force
+        }
+    }
+    if ($pluginName -eq "deepseek-harness") {
+        foreach ($file in @("package.json", "cordis.patch.yml", "index.js", "icon.svg", "locale", "README.md")) {
+            Copy-Item -LiteralPath (Join-Path $binaryDirectory "plugins\deepseek-harness\$file") -Destination $pluginOutput -Recurse -Force
+            Copy-Item -LiteralPath (Join-Path $project "plugins\deepseek-harness\$file") -Destination $sourceOutput -Recurse -Force
         }
     }
 }
